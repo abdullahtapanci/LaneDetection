@@ -87,8 +87,8 @@ class LaneNet(nn.Module):
         features, idx1, idx2, s1, s2, inp = self.encoder(x)
 
         binary_output = self.binary_decoder(
-            features, idx1, idx2, s1, s2, inp.shape[2:])
+            features, idx1, idx2, s1, s2, inp)
         embedding_output = self.embedding_decoder(
-            features, idx1, idx2, s1, s2, inp.shape[2:])
+            features, idx1, idx2, s1, s2, inp)
 
         return binary_output, embedding_output
