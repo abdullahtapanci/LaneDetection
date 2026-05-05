@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.models.encoder import RegularBottleneck, UpsamplingBottleneck
+from src.models.encoder import ENetEncoder, RegularBottleneck, UpsamplingBottleneck
 
 
 class LaneNetDecoder(nn.Module):
@@ -65,3 +65,30 @@ class LaneNetDecoder(nn.Module):
         x = self.transposed_conv(x, output_size=input_size)
 
         return x
+    
+
+class LaneNet(nn.Module):
+    """
+    LaneNet architecture combining the ENet encoder with two separate
+    decoder branches for binary segmentation and instance embedding.
+
+    Keyword arguments:
+    - embedding_dim (int): number of channels in the instance embedding output.
+    """
+
+    def __init__(self, embedding_dim=4):
+        super().__init__()
+
+        self.encoder = ENetEncoder()
+        self.binary_decoder = LaneNetDecoder(out_channels=2)
+        self.embedding_decoder = LaneNetDecoder(out_channels=embedding_dim)
+
+    def forward(self, x):
+        features, idx1, idx2, s1, s2, inp = self.encoder(x)
+
+        binary_output = self.binary_decoder(
+            features, idx1, idx2, s1, s2, inp.shape[2:])
+        embedding_output = self.embedding_decoder(
+            features, idx1, idx2, s1, s2, inp.shape[2:])
+
+        return binary_output, embedding_output
