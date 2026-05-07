@@ -18,3 +18,5 @@ ROOT_DIR = "/content/drive/MyDrive/Lane_Detection_Project/data/tusimple" #inside
 #by giving more importance to the minority class (lane markings) and less importance to the majority class 
 #(background)
 CLASS_WEIGHTS = torch.tensor([1.4506, 21.5162])
+
+EPOCHS = 5

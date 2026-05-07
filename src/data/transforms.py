@@ -7,6 +7,7 @@ def transform_image(image_path, bin_path, inst_path):
     #Here we load and resize image
     img = cv2.imread(image_path)
     img = cv2.resize(img, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
 
     #Here we load and resize binary mask
     bin_mask = cv2.imread(bin_path, cv2.IMREAD_GRAYSCALE)
@@ -23,6 +24,9 @@ def transform_image(image_path, bin_path, inst_path):
     #Here we normalize the image
     img = img.astype(np.float32) / 255.0
     # Apply ImageNet normalization here...
+    mean = np.array([0.485, 0.456, 0.406])  # in RGB
+    std  = np.array([0.229, 0.224, 0.225])
+    img = (img - mean) / std
 
     #We apply ToTensor step here. PyTorch models expect input in the form of (C, H, W) and masks should have a channel dimension as well.
     #For the image, we permute the dimensions from (H, W, C) to (C, H, W). For the masks, we add a channel dimension using unsqueeze(0).
