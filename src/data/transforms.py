@@ -24,8 +24,8 @@ def transform_image(image_path, bin_path, inst_path):
     #Here we normalize the image
     img = img.astype(np.float32) / 255.0
     # Apply ImageNet normalization here...
-    mean = np.array([0.485, 0.456, 0.406])  # in RGB
-    std  = np.array([0.229, 0.224, 0.225])
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     img = (img - mean) / std
 
     #We apply ToTensor step here. PyTorch models expect input in the form of (C, H, W) and masks should have a channel dimension as well.
