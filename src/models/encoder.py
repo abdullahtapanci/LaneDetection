@@ -394,7 +394,7 @@ class ENetEncoder(nn.Module):
 
         self.initial_block = InitialBlock(3, 16)
 
-        # Stage 1 - Encoder
+        #Stage 1 - Encoder
         self.downsample1_0 = DownsamplingBottleneck(
             16,
             64,
@@ -409,7 +409,7 @@ class ENetEncoder(nn.Module):
         self.regular1_4 = RegularBottleneck(
             64, padding=1, dropout_prob=0.01)
 
-        # Stage 2 - Encoder
+        #Stage 2 - Encoder
         self.downsample2_0 = DownsamplingBottleneck(
             64,
             128,
@@ -440,7 +440,7 @@ class ENetEncoder(nn.Module):
         self.dilated2_8 = RegularBottleneck(
             128, dilation=16, padding=16, dropout_prob=0.1)
 
-        # Stage 3 - Encoder
+        #Stage 3 - Encoder
         self.regular3_0 = RegularBottleneck(
             128, padding=1, dropout_prob=0.1)
         self.dilated3_1 = RegularBottleneck(
@@ -468,11 +468,11 @@ class ENetEncoder(nn.Module):
         
 
     def forward(self, x):
-        # Initial block
+        #Initial block
         input_size = x.size()
         x = self.initial_block(x)
 
-        # Stage 1 - Encoder
+        #Stage 1 - Encoder
         stage1_input_size = x.size()
         x, max_indices1_0 = self.downsample1_0(x)
         x = self.regular1_1(x)
@@ -480,7 +480,7 @@ class ENetEncoder(nn.Module):
         x = self.regular1_3(x)
         x = self.regular1_4(x)
 
-        # Stage 2 - Encoder
+        #Stage 2 - Encoder
         stage2_input_size = x.size()
         x, max_indices2_0 = self.downsample2_0(x)
         x = self.regular2_1(x)
@@ -492,7 +492,7 @@ class ENetEncoder(nn.Module):
         x = self.asymmetric2_7(x)
         x = self.dilated2_8(x)
 
-        # Stage 3 - Encoder
+        #Stage 3 - Encoder
         x = self.regular3_0(x)
         x = self.dilated3_1(x)
         x = self.asymmetric3_2(x)

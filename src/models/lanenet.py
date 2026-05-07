@@ -84,6 +84,8 @@ class LaneNet(nn.Module):
         self.embedding_decoder = LaneNetDecoder(out_channels=embedding_dim)
 
     def forward(self, x):
+        #Encoder returns the embeddings from the last layer of the encoder, the max pooling indices from 
+        #stages 1 and 2, the input sizes for stages 1 and 2, and the original input size.
         features, idx1, idx2, s1, s2, inp = self.encoder(x)
 
         binary_output = self.binary_decoder(
