@@ -1,7 +1,7 @@
 import numpy as np
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, MeanShift
 
-def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_samples=50, poly_degree=2, min_pixels=100):
+def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, clustering_algorithm='dbscan'):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -26,6 +26,12 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
 
     poly_degree: This is the degree of the polynomial we will fit to each lane cluster.
     min_pixels: This is the minimum number of pixels required in a cluster to consider it as a valid lane.
+
+    bandwidth: This is the bandwidth parameter for MeanShift clustering, which defines the radius of the area 
+    used to compute the mean shift.
+
+    clustering_algorithm: This is the clustering algorithm to use for grouping lane pixels based on their embeddings. 
+    It can be either 'dbscan' or 'meanshift'. 
     """
 
 
@@ -94,10 +100,16 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
     # Pixel N |  0.06,  -0.11,   1.22,   -3.44  |  
     #          -----------------------------------
 
-    #Here we apply DBSCAN clustering to the features. DBSCAN will group together pixels that have similar 
-    #embedding vectors and mark outliers as noise (label -1). 
-    db = DBSCAN(eps=eps, min_samples=min_samples)
-    labels = db.fit_predict(features)
+    labels = None
+    if clustering_algorithm == 'dbscan':
+        #Here we apply DBSCAN clustering to the features. DBSCAN will group together pixels that have similar 
+        #embedding vectors and mark outliers as noise (label -1). 
+        db = DBSCAN(eps=eps, min_samples=min_samples)
+        labels = db.fit_predict(features)
+    else:
+        ms = MeanShift(bandwidth=bandwidth, bin_seeding=True, n_jobs=-1)
+        labels = ms.fit_predict(features)
+    
     #lables is a 1D array of length N (number of lane pixels) where each element is the cluster ID assigned by DBSCAN.
     #For example, labels = np.array([0, 0, 0, -1, 0, 1, 1, 1, 1, -1])
 
@@ -139,7 +151,9 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
             'pixels':     np.stack([cys, cxs], axis=1),
         })
 
-    # Sort lanes left-to-right by their average x position (useful for ego-lane logic)
+    #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
+    #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
+    #I will just sort by the mean x coordinate of the pixels in the lane cluster.
     lanes.sort(key=lambda l: l['pixels'][:, 1].mean())
 
     return lanes
