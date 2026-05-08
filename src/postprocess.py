@@ -1,77 +1,137 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
 
-
-def get_binary_mask(binary_logits, threshold=None):
+def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_samples=50, poly_degree=2, min_pixels=100):
     """
-    Convert model's binary logits to a (H, W) bool mask.
+    Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
+    Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
+    
+    Example values at a single pixel (y=150, x=250):
+    Pixel (150,250):
+        binary_logits = [-3.21  4.78]  # [bg, lane]
+        embedding     = [ 1.42 -0.31  0.85 -1.07]      # 4-D vector
+    We can say that this pixel is likely a lane pixel (since lane logit > bg logit) and its embedding vector is [1.42, -0.31, 0.85, -1.07].
+    Here we will try to look at these embeddings across the whole image and cluster them to find which pixels belong to 
+    the same lane. The intuition is that pixels belonging to the same lane should have similar embedding vectors, 
+    so they will be close in the embedding space and can be clustered together using a method like DBSCAN. After 
+    clustering, we can fit a polynomial curve to the pixels in each cluster to get a smooth lane line.
 
-    binary_logits: numpy or torch tensor of shape (2, H, W) or (1, 2, H, W).
-                   If torch, must already be on CPU and converted with .numpy().
-    threshold:     if None, use argmax. Otherwise threshold the lane probability.
+    threshold: We will use it to convert the binary logits into a binary mask. If binary logit value for lane class is 
+    greater than the threshold, we will consider that pixel as a lane pixel (True), otherwise it will be considered as 
+    background (False). If threshold is None, we will simply take the argmax of the binary 
+    logits to determine the binary mask.
+
+    eps: This is the maximum distance between two samples for them to be considered as in the same neighborhood in DBSCAN.
+    min_samples: This is the minimum number of samples in a neighborhood to form a lane cluster in DBSCAN.
+
+    poly_degree: This is the degree of the polynomial we will fit to each lane cluster.
+    min_pixels: This is the minimum number of pixels required in a cluster to consider it as a valid lane.
     """
+
+
+
+
+    #Step 1: Converting binary logits to a binary mask
+
+    #In binary logits, ndim = 4. We need to drop the batch dimension (the first dimension) to get a shape of (2, H, W)
     if binary_logits.ndim == 4:
-        binary_logits = binary_logits[0]  # drop batch dim
+        binary_logits = binary_logits[0]
+    
+    binary_mask = None
 
     if threshold is None:
-        return binary_logits.argmax(axis=0).astype(bool)
+        binary_mask = binary_logits.argmax(axis=0).astype(bool)
     else:
-        # softmax channel 1 (lane class)
+        #We will aplly the softmax function to the binary logits to get probabilities. The softmax function is defined as:
+        #softmax(x_i) = exp(x_i) / sum_j exp(x_j)
+        #binary_logits - binary_logits.max(axis=0, keepdims=True) is a common numerical stability trick to prevent 
+        #overflow when computing the exponential. By subtracting the maximum logit value from all logits, 
+        #we ensure that the largest value passed to the exponential function is 0, which prevents very large numbers 
+        #that could cause overflow. 
         e = np.exp(binary_logits - binary_logits.max(axis=0, keepdims=True))
+        #e[1] gives us the exponentiated lane logits, and e.sum(axis=0) gives us the sum of exponentiated logits 
+        #across the two classes (background and lane) for each pixel. By dividing e[1] by e.sum(axis=0), we get 
+        #the probability of the lane class for each pixel. Finally, we compare this probability to the threshold to 
+        #get a binary mask where pixels with a lane probability greater than the threshold are marked as True (lane) 
+        #and others as False (background).  
         prob_lane = e[1] / e.sum(axis=0)
-        return prob_lane > threshold
+        binary_mask = prob_lane > threshold
 
 
-def cluster_embeddings(embedding, binary_mask, eps=1.5, min_samples=50):
-    """
-    Cluster lane pixels by their embedding vectors.
 
-    embedding:   numpy array of shape (D, H, W).
-    binary_mask: numpy bool array of shape (H, W).
-    eps, min_samples: DBSCAN hyperparameters.
 
-    Returns:
-        labels: (N,) int array — cluster id per lane pixel, -1 = noise.
-        ys, xs: (N,) int arrays — image coordinates of the lane pixels.
-    """
+
+
+
+    #Step 2: Clustering lane pixels by their embedding vectors
+
+    #We have to drop the batch dimension from the embedding as well.
     if embedding.ndim == 4:
         embedding = embedding[0]
+    
+    labels = None
 
+    #Here we just get the (y, x) coordinates of the pixels where the binary mask is True.
     ys, xs = np.where(binary_mask)
+    #If there are no lane pixels detected then ys and xs will be empty arrays.
     if len(ys) == 0:
-        return np.array([], dtype=int), ys, xs
+        labels = np.array([], dtype=int)
 
-    features = embedding[:, ys, xs].T  # (N, D)
+    # : means take all embedding dimensions, and ys, xs are the coordinates of the lane pixels. Here we get the 
+    #embeeding values for the given lane pixel coordinates.
+    features = embedding[:, ys, xs] # shape (D, N)
+    #We need to transpose the features to have shape (N, D) because DBSCAN expects samples as rows and features as columns.
+    features = features.T  #shape (N, D) for DBSCAN
+    #Example matrix would be like this:
+    #           Dim 0    Dim 1    Dim 2    Dim 3
+    #           (Ch 0)   (Ch 1)   (Ch 2)   (Ch 3)
+    #          ___________________________________
+    # Pixel 1 |  8.26,  -2.14,   5.50,  -11.91  |  
+    # Pixel 2 |  8.10,  -2.20,   5.45,  -11.85  |  
+    # Pixel 3 | -6.53,   9.44,  -1.20,    4.10  |  
+    # Pixel 4 | -6.40,   9.30,  -1.15,    4.05  |  
+    # ...     |  ...     ...     ...      ...  
+    # Pixel N |  0.06,  -0.11,   1.22,   -3.44  |  
+    #          -----------------------------------
 
+    #Here we apply DBSCAN clustering to the features. DBSCAN will group together pixels that have similar 
+    #embedding vectors and mark outliers as noise (label -1). 
     db = DBSCAN(eps=eps, min_samples=min_samples)
     labels = db.fit_predict(features)
-    return labels, ys, xs
+    #lables is a 1D array of length N (number of lane pixels) where each element is the cluster ID assigned by DBSCAN.
+    #For example, labels = np.array([0, 0, 0, -1, 0, 1, 1, 1, 1, -1])
 
 
-def fit_lanes(labels, ys, xs, poly_degree=2, min_pixels=100):
-    """
-    Fit a polynomial x = f(y) per cluster.
 
-    labels:      (N,) int — output of cluster_embeddings
-    ys, xs:      (N,) int — pixel coords
-    poly_degree: 2 or 3
-    min_pixels:  reject clusters with fewer than this many pixels (noise filter)
 
-    Returns: list of dicts, one per detected lane:
-        {'cluster_id': int,
-         'poly':       np.ndarray of polynomial coefficients,
-         'y_range':    (y_min, y_max),
-         'pixels':     (n, 2) array of (y, x) coords}
-    """
+
+
+
+    #Step 3: Fitting polynomial curves to each cluster of lane pixels
+
     lanes = []
     for cid in np.unique(labels):
+
+        #Ignore the noise points labeled as -1 by DBSCAN
         if cid == -1:
             continue
+
+        #Get the mask for the current cluster ID. This will give us a boolean array where True 
+        #corresponds to pixels belonging to the current cluster.
         mask = labels == cid
+
+        #Here we check if the number of pixels in the cluster is less than the minimum required pixels. 
         if mask.sum() < min_pixels:
             continue
+
+        #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
         cys, cxs = ys[mask], xs[mask]
+
+        #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
         coeffs = np.polyfit(cys, cxs, deg=poly_degree)
+
+        #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
+        #the range of y values, and the pixel coordinates.
         lanes.append({
             'cluster_id': int(cid),
             'poly':       coeffs,
@@ -81,23 +141,9 @@ def fit_lanes(labels, ys, xs, poly_degree=2, min_pixels=100):
 
     # Sort lanes left-to-right by their average x position (useful for ego-lane logic)
     lanes.sort(key=lambda l: l['pixels'][:, 1].mean())
+
     return lanes
-
-
-def postprocess(binary_logits, embedding,
-                eps=1.5, min_samples=50,
-                poly_degree=2, min_pixels=100,
-                threshold=None):
-    """
-    Full pipeline: model outputs -> list of lane dicts.
-
-    binary_logits, embedding: numpy arrays. Single-image (batch dim optional).
-    """
-    binary_mask = get_binary_mask(binary_logits, threshold=threshold)
-    labels, ys, xs = cluster_embeddings(embedding, binary_mask,
-                                        eps=eps, min_samples=min_samples)
-    return fit_lanes(labels, ys, xs,
-                     poly_degree=poly_degree, min_pixels=min_pixels)
+    
 
 
 def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
