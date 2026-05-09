@@ -82,15 +82,15 @@ def seeTransforms(image_path, bin_path, inst_path):
 
 #Data Augmentation functions
 def random_brightness(img):
-
-    if random.random() < 0.5:
-
-        factor = random.uniform(0.7, 1.3)
-
-        img = img.astype(np.float32) * factor
-        img = np.clip(img, 0, 255)
-
-    return img.astype(np.uint8)
+    if random.random() < 0.6: # Increased probability slightly
+        # Range (0.5, 1.5) allows for much darker and much brighter images
+        factor = random.uniform(0.5, 1.5)
+        
+        # Using cv2.convertScaleAbs is faster than manual astype and clipping
+        # alpha is the scale factor, beta is an offset (set to 0 here)
+        img = cv2.convertScaleAbs(img, alpha=factor, beta=0)
+        
+    return img
 
 def random_blur(img):
 
