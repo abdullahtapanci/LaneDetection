@@ -153,7 +153,7 @@ def random_perspective(img, bin_mask, inst_mask):
             [w,h]
         ])
 
-        delta = 20
+        delta = 30
 
         dst = np.float32([
             [random.randint(0, delta), random.randint(0, delta)],
