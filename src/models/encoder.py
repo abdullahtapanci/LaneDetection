@@ -414,49 +414,49 @@ class ENetEncoder(nn.Module):
             64,
             128,
             return_indices=True,
-            dropout_prob=0.1)
+            dropout_prob=0.3)
         self.regular2_1 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1)
+            128, padding=1, dropout_prob=0.3)
         self.dilated2_2 = RegularBottleneck(
-            128, dilation=2, padding=2, dropout_prob=0.1)
+            128, dilation=2, padding=2, dropout_prob=0.3)
         self.asymmetric2_3 = RegularBottleneck(
             128,
             kernel_size=5,
             padding=2,
             asymmetric=True,
-            dropout_prob=0.1)
+            dropout_prob=0.3)
         self.dilated2_4 = RegularBottleneck(
-            128, dilation=4, padding=4, dropout_prob=0.1)
+            128, dilation=4, padding=4, dropout_prob=0.3)
         self.regular2_5 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1)
+            128, padding=1, dropout_prob=0.3)
         self.dilated2_6 = RegularBottleneck(
-            128, dilation=8, padding=8, dropout_prob=0.1)
+            128, dilation=8, padding=8, dropout_prob=0.3)
         self.asymmetric2_7 = RegularBottleneck(
             128,
             kernel_size=5,
             asymmetric=True,
             padding=2,
-            dropout_prob=0.1)
+            dropout_prob=0.3)
         self.dilated2_8 = RegularBottleneck(
-            128, dilation=16, padding=16, dropout_prob=0.1)
+            128, dilation=16, padding=16, dropout_prob=0.3)
 
         #Stage 3 - Encoder
         self.regular3_0 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1)
+            128, padding=1, dropout_prob=0.3)
         self.dilated3_1 = RegularBottleneck(
-            128, dilation=2, padding=2, dropout_prob=0.1)
+            128, dilation=2, padding=2, dropout_prob=0.3)
         self.asymmetric3_2 = RegularBottleneck(
             128,
             kernel_size=5,
             padding=2,
             asymmetric=True,
-            dropout_prob=0.1)
+            dropout_prob=0.3)
         self.dilated3_3 = RegularBottleneck(
-            128, dilation=4, padding=4, dropout_prob=0.1)
+            128, dilation=4, padding=4, dropout_prob=0.3)
         self.regular3_4 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1)
+            128, padding=1, dropout_prob=0.3)
         self.dilated3_5 = RegularBottleneck(
-            128, dilation=8, padding=8, dropout_prob=0.1)
+            128, dilation=8, padding=8, dropout_prob=0.3)
         self.asymmetric3_6 = RegularBottleneck(
             128,
             kernel_size=5,
