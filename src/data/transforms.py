@@ -84,7 +84,7 @@ def seeTransforms(image_path, bin_path, inst_path):
 def random_brightness(img):
     if random.random() < 0.6: # Increased probability slightly
         # Range (0.5, 1.5) allows for much darker and much brighter images
-        factor = random.uniform(0.5, 1.5)
+        factor = random.uniform(0.3, 1.8)
         
         # Using cv2.convertScaleAbs is faster than manual astype and clipping
         # alpha is the scale factor, beta is an offset (set to 0 here)
