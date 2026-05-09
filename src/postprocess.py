@@ -17,11 +17,12 @@ src_pts = np.array([
 ], dtype=np.float32)
 #dst_pts are the coordinates of the four points in the bird's-eye view space that correspond to the src_pts. In the BEV 
 #space, we want these points to form a straight rectangle where the lanes are parallel and vertical.
+# Assuming your image width is 512
 dst_pts = np.array([
-    [100, 600],
-    [300, 600],
-    [100,   0],
-    [300,   0],
+    [150, 600],   # Bottom-Left
+    [362, 600],   # Bottom-Right (keeping it 212px wide to match some perspective)
+    [150,   0],   # Top-Left
+    [362,   0],   # Top-Right
 ], dtype=np.float32)
 
 H_to_bev   = cv2.getPerspectiveTransform(src_pts, dst_pts)
