@@ -1,7 +1,39 @@
 import numpy as np
 from sklearn.cluster import DBSCAN, MeanShift
+import cv2
 
-def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, clustering_algorithm='dbscan'):
+
+
+
+
+#Here we define the perspective transformation matrices to convert between the original image space and the 
+#bird's-eye view (BEV) space.
+#src_pts are the coordinates of the four points in the original image that form a rectangle around the lane markings.
+src_pts = np.array([
+    [180, 256],   # 4 image-space points forming a road rectangle
+    [332, 256],
+    [220, 150],
+    [292, 150],
+], dtype=np.float32)
+#dst_pts are the coordinates of the four points in the bird's-eye view space that correspond to the src_pts. In the BEV 
+#space, we want these points to form a straight rectangle where the lanes are parallel and vertical.
+dst_pts = np.array([
+    [100, 600],
+    [300, 600],
+    [100,   0],
+    [300,   0],
+], dtype=np.float32)
+
+H_to_bev   = cv2.getPerspectiveTransform(src_pts, dst_pts)
+H_from_bev = cv2.getPerspectiveTransform(dst_pts, src_pts)
+
+
+
+
+
+def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
+                   min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
+                   clustering_algorithm='dbscan', using_bev=False):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -74,14 +106,12 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
     #We have to drop the batch dimension from the embedding as well.
     if embedding.ndim == 4:
         embedding = embedding[0]
-    
-    labels = None
 
     #Here we just get the (y, x) coordinates of the pixels where the binary mask is True.
     ys, xs = np.where(binary_mask)
     #If there are no lane pixels detected then ys and xs will be empty arrays.
     if len(ys) == 0:
-        labels = np.array([], dtype=int)
+        return []
 
     # : means take all embedding dimensions, and ys, xs are the coordinates of the lane pixels. Here we get the 
     #embeeding values for the given lane pixel coordinates.
@@ -139,17 +169,21 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
         #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
         cys, cxs = ys[mask], xs[mask]
 
-        #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
-        coeffs = np.polyfit(cys, cxs, deg=poly_degree)
+        if using_bev:
+            #If we are using bird's-eye view (BEV) for polynomial fitting, we will call the fit_lanes_using_bev function instead of fitting in the original image space.
+            lanes.append(fit_lanes_using_bev(H_to_bev, cys, cxs, poly_degree, cid))
+        else:
+            #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
+            coeffs = np.polyfit(cys, cxs, deg=poly_degree)
 
-        #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
-        #the range of y values, and the pixel coordinates.
-        lanes.append({
-            'cluster_id': int(cid),
-            'poly':       coeffs,
-            'y_range':    (int(cys.min()), int(cys.max())),
-            'pixels':     np.stack([cys, cxs], axis=1),
-        })
+            #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
+            #the range of y values, and the pixel coordinates.
+            lanes.append({
+                'cluster_id': int(cid),
+                'poly':       coeffs,
+                'y_range':    (int(cys.min()), int(cys.max())),
+                'pixels':     np.stack([cys, cxs], axis=1),
+            })
 
     #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
     #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
@@ -159,15 +193,64 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, min_sample
     return lanes
     
 
+#Here we try to fit polynomial curves in the bird's-eye view space instead of the original image space. 
+#This is because in the BEV space, the lanes are more likely to be straight and parallel, which makes polynomial 
+#fitting more accurate and stable.
+def fit_lanes_using_bev(H_to_bev, cys, cxs, poly_degree=2, cid=0):
+        
+    #Here we convert the (y, x) coordinates of the lane pixels from the original image space to the bird's-eye 
+    #view (BEV) space using the perspective transformation matrix H_to_bev.
+    pts_img = np.column_stack([cxs, cys, np.ones(len(cxs))]).T   # (3, N)
+    pts_bev = H_to_bev @ pts_img
+    pts_bev = pts_bev[:2] / pts_bev[2:]                           # divide by w
+    bev_xs, bev_ys = pts_bev[0], pts_bev[1]
 
-def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
+    #here we fit in BEV space (lanes are nearly straight here)
+    coeffs = np.polyfit(bev_ys, bev_xs, deg=poly_degree)
+
+    return {
+        'cluster_id':  int(cid),
+        'poly':    coeffs,
+        'y_range': (float(bev_ys.min()), float(bev_ys.max())),
+        'pixels':      np.stack([cys, cxs], axis=1),
+    }
+
+def draw_lanes_using_bev(image_rgb, lanes, color_palette=None, thickness=4):
+    if color_palette is None:
+        color_palette = [(255,56,56), (56,255,56), (56,56,255), (255,255,56)]
+    out = image_rgb.copy()
+    H_img, W_img = out.shape[:2]
+
+    for i, lane in enumerate(lanes):
+        bev_y_min, bev_y_max = lane['y_range']
+
+        # ─── Sample polynomial in BEV ──────────────────
+        bev_ys = np.linspace(bev_y_min, bev_y_max, 100)
+        bev_xs = np.polyval(lane['poly'], bev_ys)
+
+        # ─── Warp back to image space ──────────────────
+        pts_bev = np.column_stack([bev_xs, bev_ys, np.ones(len(bev_ys))]).T
+        pts_img = H_from_bev @ pts_bev
+        pts_img = pts_img[:2] / pts_img[2:]
+        img_xs = pts_img[0].astype(int)
+        img_ys = pts_img[1].astype(int)
+
+        # ─── Draw, clipped to image bounds ─────────────
+        valid = (img_xs >= 0) & (img_xs < W_img) & \
+                (img_ys >= 0) & (img_ys < H_img)
+        pts = np.stack([img_xs[valid], img_ys[valid]], axis=1)
+        color = color_palette[i % len(color_palette)]
+        for j in range(len(pts) - 1):
+            cv2.line(out, tuple(pts[j]), tuple(pts[j+1]), color, thickness)
+    return out
+
+def draw_lanes_without_bev(image_rgb, lanes, color_palette=None, thickness=3):
     """
     Draw fitted polynomial curves on an image. Returns annotated copy.
 
     image_rgb: (H, W, 3) uint8.
     lanes:     output of postprocess().
     """
-    import cv2
     if color_palette is None:
         color_palette = [
             (255,  56,  56),   # red
@@ -191,3 +274,11 @@ def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
         for j in range(len(pts) - 1):
             cv2.line(out, tuple(pts[j]), tuple(pts[j + 1]), color, thickness)
     return out
+
+
+
+def draw_lanes(image_rgb, lanes, using_bev=False, color_palette=None, thickness=3):
+    if using_bev:
+        return draw_lanes_using_bev(image_rgb, lanes, color_palette, thickness)
+    else:
+        return draw_lanes_without_bev(image_rgb, lanes, color_palette, thickness)

@@ -23,9 +23,16 @@ def transform_image(image_path, bin_path, inst_path):
 
     #Here we normalize the image
     img = img.astype(np.float32) / 255.0
-    # Apply ImageNet normalization here...
+    #We apply ImageNet normalization. This is a common practice when using pretrained models, as it helps the model to 
+    #generalize better by normalizing the input data to have a similar distribution as the data it was originally 
+    #trained on (ImageNet). The mean and std values are calculated from the ImageNet dataset and are used to normalize 
+    #each channel of the image.
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    #Here we perform standardization (also caled z-score normalization) by subtracting the mean and dividing by the 
+    #standard deviation for each channel of the image. img- mean gives us the centered data (mean of 0), and dividing by 
+    #std scales the data fall between -1 and 1 (for most pixel values), which can help the model to converge faster 
+    #during training.
     img = (img - mean) / std
 
     #We apply ToTensor step here. PyTorch models expect input in the form of (C, H, W) and masks should have a channel dimension as well.
