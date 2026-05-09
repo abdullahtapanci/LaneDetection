@@ -126,82 +126,35 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
 
     #Step 3: Fitting polynomial curves to each cluster of lane pixels
 
-    # lanes = []
-    # for cid in np.unique(labels):
-
-    #     #Ignore the noise points labeled as -1 by DBSCAN
-    #     if cid == -1:
-    #         continue
-
-    #     #Get the mask for the current cluster ID. This will give us a boolean array where True 
-    #     #corresponds to pixels belonging to the current cluster.
-    #     mask = labels == cid
-
-    #     #Here we check if the number of pixels in the cluster is less than the minimum required pixels. 
-    #     if mask.sum() < min_pixels:
-    #         continue
-
-    #     #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
-    #     cys, cxs = ys[mask], xs[mask]
-
-    #     #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
-    #     coeffs = np.polyfit(cys, cxs, deg=poly_degree)
-
-    #     #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
-    #     #the range of y values, and the pixel coordinates.
-    #     lanes.append({
-    #         'cluster_id': int(cid),
-    #         'poly':       coeffs,
-    #         'y_range':    (int(cys.min()), int(cys.max())),
-    #         'pixels':     np.stack([cys, cxs], axis=1),
-    #     })
-    
-    # Step 3: Fitting polynomial curves using RANSAC
     lanes = []
     for cid in np.unique(labels):
+
+        #Ignore the noise points labeled as -1 by DBSCAN
         if cid == -1:
             continue
 
+        #Get the mask for the current cluster ID. This will give us a boolean array where True 
+        #corresponds to pixels belonging to the current cluster.
         mask = labels == cid
+
+        #Here we check if the number of pixels in the cluster is less than the minimum required pixels. 
         if mask.sum() < min_pixels:
             continue
 
+        #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
         cys, cxs = ys[mask], xs[mask]
 
-        # RANSAC needs 2D input for features (y) and 1D for target (x)
-        # We reshape cys to (-1, 1) because we are modeling x = f(y)
-        Y = cys.reshape(-1, 1)
-        X = cxs
+        #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
+        coeffs = np.polyfit(cys, cxs, deg=poly_degree)
 
-        try:
-            # Create a pipeline that generates polynomial features and then fits RANSAC
-            # This allows RANSAC to fit a curve (degree 2) rather than just a straight line.
-            model = make_pipeline(
-                PolynomialFeatures(degree=poly_degree), 
-                RANSACRegressor(residual_threshold=5.0) # threshold for what is considered an 'inlier'
-            )
-            
-            model.fit(Y, X)
-            
-            # To maintain compatibility with your 'draw' functions, 
-            # we can extract the coefficients from the underlying linear model.
-            # Note: The coefficients are in order [1, y, y^2]
-            ransac_model = model.named_steps['ransacregressor'].estimator_
-            coeffs = ransac_model.coef_ # This returns [0, b, a] for ay^2 + by + c
-            coeffs[0] = ransac_model.intercept_ # Set the 'c' constant
-            coeffs = coeffs[::-1] # Reverse to get [a, b, c] for np.polyval compatibility
-
-            lanes.append({
-                'cluster_id': int(cid),
-                'poly':       coeffs,
-                'y_range':    (int(cys.min()), int(cys.max())),
-                'pixels':     np.stack([cys, cxs], axis=1),
-            })
-            
-        except ValueError:
-            # RANSAC might fail if the cluster is too small or contains only noise
-            continue
-
+        #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
+        #the range of y values, and the pixel coordinates.
+        lanes.append({
+            'cluster_id': int(cid),
+            'poly':       coeffs,
+            'y_range':    (int(cys.min()), int(cys.max())),
+            'pixels':     np.stack([cys, cxs], axis=1),
+        })
 
     #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
     #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
