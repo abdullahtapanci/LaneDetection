@@ -10,10 +10,10 @@ import cv2
 #bird's-eye view (BEV) space.
 #src_pts are the coordinates of the four points in the original image that form a rectangle around the lane markings.
 src_pts = np.array([
-    [180, 256],   # 4 image-space points forming a road rectangle
-    [332, 256],
-    [220, 150],
-    [292, 150],
+    [0, 256],   # 4 image-space points forming a road rectangle
+    [512, 256],
+    [100, 120],
+    [412, 120],
 ], dtype=np.float32)
 #dst_pts are the coordinates of the four points in the bird's-eye view space that correspond to the src_pts. In the BEV 
 #space, we want these points to form a straight rectangle where the lanes are parallel and vertical.
