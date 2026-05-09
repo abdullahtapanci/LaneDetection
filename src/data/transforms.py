@@ -51,6 +51,33 @@ def transform_image(image_path, bin_path, inst_path):
     return img, bin_mask, inst_mask
 
 
+def seeTransforms(image_path, bin_path, inst_path):
+    #Here we load and resize image
+    img = cv2.imread(image_path)
+    img = cv2.resize(img, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
+
+    #Here we load and resize binary mask
+    bin_mask = cv2.imread(bin_path, cv2.IMREAD_GRAYSCALE)
+    #We use INTER_NEAREST for masks to avoid introducing new pixel values during resizing.
+    bin_mask = cv2.resize(bin_mask, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT), interpolation=cv2.INTER_NEAREST)
+    #We binarize the mask (0 for background, 1 for lane) and convert to float32 for PyTorch compatibility.
+    bin_mask = (bin_mask > 0).astype(np.float32)
+
+    #Here we load and resize instance mask. Each lane instance has a unique pixel value. We didn't need to binarize this 
+    #mask since we want to keep which pixel belongs to which lane.
+    inst_mask = cv2.imread(inst_path, cv2.IMREAD_GRAYSCALE)
+    inst_mask = cv2.resize(inst_mask, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT), interpolation=cv2.INTER_NEAREST)
+
+    #This part contains the data augmentation steps.
+    img = random_brightness(img)
+    img = random_blur(img)
+    img, bin_mask, inst_mask = random_translate(img, bin_mask, inst_mask)
+    img, bin_mask, inst_mask = random_perspective(img, bin_mask, inst_mask)
+
+    return img, bin_mask, inst_mask
+
+
 
 
 #Data Augmentation functions
