@@ -2,6 +2,7 @@ import cv2
 import src.config as cfg
 import numpy as np
 import torch
+import random
 
 def transform_image(image_path, bin_path, inst_path):
     #Here we load and resize image
@@ -20,6 +21,12 @@ def transform_image(image_path, bin_path, inst_path):
     #mask since we want to keep which pixel belongs to which lane.
     inst_mask = cv2.imread(inst_path, cv2.IMREAD_GRAYSCALE)
     inst_mask = cv2.resize(inst_mask, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT), interpolation=cv2.INTER_NEAREST)
+
+    #This part contains the data augmentation steps.
+    img = random_brightness(img)
+    img = random_blur(img)
+    img, bin_mask, inst_mask = random_translate(img, bin_mask, inst_mask)
+    img, bin_mask, inst_mask = random_perspective(img, bin_mask, inst_mask)
 
     #Here we normalize the image
     img = img.astype(np.float32) / 255.0
@@ -42,3 +49,115 @@ def transform_image(image_path, bin_path, inst_path):
     inst_mask = torch.from_numpy(inst_mask).unsqueeze(0)
 
     return img, bin_mask, inst_mask
+
+
+
+
+#Data Augmentation functions
+def random_brightness(img):
+
+    if random.random() < 0.5:
+
+        factor = random.uniform(0.7, 1.3)
+
+        img = img.astype(np.float32) * factor
+        img = np.clip(img, 0, 255)
+
+    return img.astype(np.uint8)
+
+def random_blur(img):
+
+    if random.random() < 0.3:
+        img = cv2.GaussianBlur(img, (5,5), 0)
+
+    return img
+
+def random_translate(img, bin_mask, inst_mask):
+
+    if random.random() < 0.5:
+
+        tx = random.randint(-20, 20)
+        ty = random.randint(-10, 10)
+
+        M = np.float32([
+            [1, 0, tx],
+            [0, 1, ty]
+        ])
+
+        h, w = img.shape[:2]
+
+        img = cv2.warpAffine(
+            img,
+            M,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT
+        )
+
+        bin_mask = cv2.warpAffine(
+            bin_mask,
+            M,
+            (w, h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT
+        )
+
+        inst_mask = cv2.warpAffine(
+            inst_mask,
+            M,
+            (w, h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT
+        )
+
+    return img, bin_mask, inst_mask
+
+
+def random_perspective(img, bin_mask, inst_mask):
+
+    if random.random() < 0.5:
+
+        h, w = img.shape[:2]
+
+        src = np.float32([
+            [0,0],
+            [w,0],
+            [0,h],
+            [w,h]
+        ])
+
+        delta = 40
+
+        dst = np.float32([
+            [random.randint(0, delta), random.randint(0, delta)],
+            [w-random.randint(0, delta), random.randint(0, delta)],
+            [random.randint(0, delta), h-random.randint(0, delta)],
+            [w-random.randint(0, delta), h-random.randint(0, delta)]
+        ])
+
+        M = cv2.getPerspectiveTransform(src, dst)
+
+        img = cv2.warpPerspective(
+            img,
+            M,
+            (w, h),
+            flags=cv2.INTER_LINEAR
+        )
+
+        bin_mask = cv2.warpPerspective(
+            bin_mask,
+            M,
+            (w, h),
+            flags=cv2.INTER_NEAREST
+        )
+
+        inst_mask = cv2.warpPerspective(
+            inst_mask,
+            M,
+            (w, h),
+            flags=cv2.INTER_NEAREST
+        )
+
+    return img, bin_mask, inst_mask
+
+
