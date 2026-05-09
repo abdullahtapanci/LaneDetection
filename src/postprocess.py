@@ -3,35 +3,6 @@ from sklearn.cluster import DBSCAN, MeanShift
 import cv2
 
 
-
-
-
-#Here we define the perspective transformation matrices to convert between the original image space and the 
-#bird's-eye view (BEV) space.
-#src_pts are the coordinates of the four points in the original image that form a rectangle around the lane markings.
-src_pts = np.array([
-    [0, 256],   # 4 image-space points forming a road rectangle
-    [512, 256],
-    [100, 120],
-    [412, 120],
-], dtype=np.float32)
-#dst_pts are the coordinates of the four points in the bird's-eye view space that correspond to the src_pts. In the BEV 
-#space, we want these points to form a straight rectangle where the lanes are parallel and vertical.
-# Assuming your image width is 512
-dst_pts = np.array([
-    [150, 600],   # Bottom-Left
-    [362, 600],   # Bottom-Right (keeping it 212px wide to match some perspective)
-    [150,   0],   # Top-Left
-    [362,   0],   # Top-Right
-], dtype=np.float32)
-
-H_to_bev   = cv2.getPerspectiveTransform(src_pts, dst_pts)
-H_from_bev = cv2.getPerspectiveTransform(dst_pts, src_pts)
-
-
-
-
-
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
                    clustering_algorithm='dbscan', using_bev=False):
@@ -170,21 +141,17 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
         #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
         cys, cxs = ys[mask], xs[mask]
 
-        if using_bev:
-            #If we are using bird's-eye view (BEV) for polynomial fitting, we will call the fit_lanes_using_bev function instead of fitting in the original image space.
-            lanes.append(fit_lanes_using_bev(H_to_bev, cys, cxs, poly_degree, cid))
-        else:
-            #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
-            coeffs = np.polyfit(cys, cxs, deg=poly_degree)
+        #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
+        coeffs = np.polyfit(cys, cxs, deg=poly_degree)
 
-            #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
-            #the range of y values, and the pixel coordinates.
-            lanes.append({
-                'cluster_id': int(cid),
-                'poly':       coeffs,
-                'y_range':    (int(cys.min()), int(cys.max())),
-                'pixels':     np.stack([cys, cxs], axis=1),
-            })
+        #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
+        #the range of y values, and the pixel coordinates.
+        lanes.append({
+            'cluster_id': int(cid),
+            'poly':       coeffs,
+            'y_range':    (int(cys.min()), int(cys.max())),
+            'pixels':     np.stack([cys, cxs], axis=1),
+        })
 
     #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
     #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
@@ -194,58 +161,8 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
     return lanes
     
 
-#Here we try to fit polynomial curves in the bird's-eye view space instead of the original image space. 
-#This is because in the BEV space, the lanes are more likely to be straight and parallel, which makes polynomial 
-#fitting more accurate and stable.
-def fit_lanes_using_bev(H_to_bev, cys, cxs, poly_degree=2, cid=0):
-        
-    #Here we convert the (y, x) coordinates of the lane pixels from the original image space to the bird's-eye 
-    #view (BEV) space using the perspective transformation matrix H_to_bev.
-    pts_img = np.column_stack([cxs, cys, np.ones(len(cxs))]).T   # (3, N)
-    pts_bev = H_to_bev @ pts_img
-    pts_bev = pts_bev[:2] / pts_bev[2:]                           # divide by w
-    bev_xs, bev_ys = pts_bev[0], pts_bev[1]
 
-    #here we fit in BEV space (lanes are nearly straight here)
-    coeffs = np.polyfit(bev_ys, bev_xs, deg=poly_degree)
-
-    return {
-        'cluster_id':  int(cid),
-        'poly':    coeffs,
-        'y_range': (float(bev_ys.min()), float(bev_ys.max())),
-        'pixels':      np.stack([cys, cxs], axis=1),
-    }
-
-def draw_lanes_using_bev(image_rgb, lanes, color_palette=None, thickness=4):
-    if color_palette is None:
-        color_palette = [(255,56,56), (56,255,56), (56,56,255), (255,255,56)]
-    out = image_rgb.copy()
-    H_img, W_img = out.shape[:2]
-
-    for i, lane in enumerate(lanes):
-        bev_y_min, bev_y_max = lane['y_range']
-
-        # ─── Sample polynomial in BEV ──────────────────
-        bev_ys = np.linspace(bev_y_min, bev_y_max, 100)
-        bev_xs = np.polyval(lane['poly'], bev_ys)
-
-        # ─── Warp back to image space ──────────────────
-        pts_bev = np.column_stack([bev_xs, bev_ys, np.ones(len(bev_ys))]).T
-        pts_img = H_from_bev @ pts_bev
-        pts_img = pts_img[:2] / pts_img[2:]
-        img_xs = pts_img[0].astype(int)
-        img_ys = pts_img[1].astype(int)
-
-        # ─── Draw, clipped to image bounds ─────────────
-        valid = (img_xs >= 0) & (img_xs < W_img) & \
-                (img_ys >= 0) & (img_ys < H_img)
-        pts = np.stack([img_xs[valid], img_ys[valid]], axis=1)
-        color = color_palette[i % len(color_palette)]
-        for j in range(len(pts) - 1):
-            cv2.line(out, tuple(pts[j]), tuple(pts[j+1]), color, thickness)
-    return out
-
-def draw_lanes_without_bev(image_rgb, lanes, color_palette=None, thickness=3):
+def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
     """
     Draw fitted polynomial curves on an image. Returns annotated copy.
 
@@ -275,11 +192,3 @@ def draw_lanes_without_bev(image_rgb, lanes, color_palette=None, thickness=3):
         for j in range(len(pts) - 1):
             cv2.line(out, tuple(pts[j]), tuple(pts[j + 1]), color, thickness)
     return out
-
-
-
-def draw_lanes(image_rgb, lanes, using_bev=False, color_palette=None, thickness=3):
-    if using_bev:
-        return draw_lanes_using_bev(image_rgb, lanes, color_palette, thickness)
-    else:
-        return draw_lanes_without_bev(image_rgb, lanes, color_palette, thickness)
