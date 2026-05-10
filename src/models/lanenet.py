@@ -108,7 +108,7 @@ class LaneNet(nn.Module):
 # 2. We use F.interpolate with size=skip.shape[-2:] (rather than scale_factor=2) so odd-sized
 #    inputs still align perfectly with their skip features instead of being off by one.
 class _DecoderBlock(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(self, in_channels, skip_channels, out_channels, dropout_p=0.1):
         super().__init__()
         #After the optional concat, the conv input has in_channels + skip_channels channels.
         #When there's no skip (deepest two upsamples), skip_channels is 0.
@@ -117,6 +117,8 @@ class _DecoderBlock(nn.Module):
         total_in = in_channels + skip_channels
 
         #Here we define the conv block that will process the upsampled features (and concatenated skip if available).
+        #Dropout2d at the end zeroes whole feature channels (not individual pixels), which is the right form
+        #of dropout for convolutional features. p=0 effectively disables it.
         self.conv = nn.Sequential(
             nn.Conv2d(total_in, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
@@ -124,6 +126,7 @@ class _DecoderBlock(nn.Module):
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(p=dropout_p),
         )
 
     def forward(self, x, skip=None):
@@ -149,17 +152,18 @@ class ResNet34Decoder(nn.Module):
     and outputs a dense map at full input resolution with `out_channels` channels.
     """
 
-    def __init__(self, out_channels, encoder_channels=ResNet34Encoder.OUT_CHANNELS):
+    def __init__(self, out_channels, encoder_channels=ResNet34Encoder.OUT_CHANNELS, dropout_p=0.1):
         super().__init__()
         c4, c8, c16, c32 = encoder_channels   #(64, 128, 256, 512) for ResNet34
 
         #Channel widths going up: 512 -> 256 -> 128 -> 64 -> 32 -> 16. Modest decoder so the
-        #encoder remains the part with most of the model's capacity.
-        self.up1 = _DecoderBlock(c32, c16, 256)  # s32 -> s16, fuse with s16
-        self.up2 = _DecoderBlock(256, c8,  128)  # s16 -> s8,  fuse with s8
-        self.up3 = _DecoderBlock(128, c4,   64)  # s8  -> s4,  fuse with s4
-        self.up4 = _DecoderBlock( 64,  0,   32)  # s4  -> s2,  no skip available
-        self.up5 = _DecoderBlock( 32,  0,   16)  # s2  -> s1,  no skip available
+        #encoder remains the part with most of the model's capacity. dropout_p is applied at
+        #the end of every block; set to 0.0 to disable.
+        self.up1 = _DecoderBlock(c32, c16, 256, dropout_p=dropout_p)  # s32 -> s16, fuse with s16
+        self.up2 = _DecoderBlock(256, c8,  128, dropout_p=dropout_p)  # s16 -> s8,  fuse with s8
+        self.up3 = _DecoderBlock(128, c4,   64, dropout_p=dropout_p)  # s8  -> s4,  fuse with s4
+        self.up4 = _DecoderBlock( 64,  0,   32, dropout_p=dropout_p)  # s4  -> s2,  no skip available
+        self.up5 = _DecoderBlock( 32,  0,   16, dropout_p=dropout_p)  # s2  -> s1,  no skip available
 
         #1x1 conv just rescales the channel count. No activation, so we return raw logits for
         #the binary head and raw embeddings for the embedding head, matching what the loss expects.
@@ -196,14 +200,17 @@ class LaneNetResNet34(nn.Module):
     - pretrained (bool): load ImageNet weights into the encoder (default True).
     """
 
-    def __init__(self, embedding_dim=4, pretrained=True):
+    def __init__(self, embedding_dim=4, pretrained=True, decoder_dropout=0.1):
         super().__init__()
 
         self.encoder = ResNet34Encoder(pretrained=pretrained)
         enc_channels = ResNet34Encoder.OUT_CHANNELS
 
-        self.binary_decoder    = ResNet34Decoder(out_channels=2,             encoder_channels=enc_channels)
-        self.embedding_decoder = ResNet34Decoder(out_channels=embedding_dim, encoder_channels=enc_channels)
+        #Same dropout rate on both heads. If the embedding head suffers (disc loss climbs unexpectedly),
+        #drop this to 0.0 just for the embedding decoder by passing decoder_dropout=0 here and passing
+        #a separate value below. For now, keep them symmetric.
+        self.binary_decoder    = ResNet34Decoder(out_channels=2,             encoder_channels=enc_channels, dropout_p=decoder_dropout)
+        self.embedding_decoder = ResNet34Decoder(out_channels=embedding_dim, encoder_channels=enc_channels, dropout_p=decoder_dropout)
 
     def forward(self, x):
         #Remember the input H, W so the decoder can guarantee the output matches exactly.

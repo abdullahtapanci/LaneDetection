@@ -1,7 +1,11 @@
 import torch
 
-IMAGE_WIDTH = 512
-IMAGE_HEIGHT = 256
+#Both must stay divisible by 32 so the ResNet34 stride-32 features align cleanly with the
+#U-Net upsamples. 768x384 keeps the 2:1 aspect ratio of the previous 512x256 setup and is
+#~2.25x more pixels, which gives the binary head more signal per lane without quadrupling
+#memory.
+IMAGE_WIDTH = 768
+IMAGE_HEIGHT = 384
 BATCH_SIZE = 8
 LEARNING_RATE = 5e-4
 DEVICE = "cuda"
