@@ -19,4 +19,4 @@ ROOT_DIR = "/content/drive/MyDrive/Lane_Detection_Project/data/tusimple" #inside
 #(background)
 CLASS_WEIGHTS = torch.tensor([1.4506, 21.5162])
 
-EPOCHS = 75
+EPOCHS = 150
