@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.encoder import ENetEncoder, RegularBottleneck, UpsamplingBottleneck
+from src.models.ResNetEncoder import ResNet34Encoder
 
 
 class LaneNetDecoder(nn.Module):
@@ -94,3 +96,121 @@ class LaneNet(nn.Module):
             features, idx1, idx2, s1, s2, inp)
 
         return binary_output, embedding_output
+    
+
+#This is one step of the U-Net decoder. It takes a feature map at some stride, upsamples it 2x by bilinear
+#interpolation, optionally concatenates a skip feature from the encoder at the same resolution,
+#then runs a small conv block (3x3 conv -> BN -> ReLU, twice) to fuse them.
+
+#Two design choices worth noting:
+# 1. Bilinear upsample + conv is preferred over ConvTranspose2d here because transposed conv
+#    tends to introduce checkerboard artifacts on thin structures like lanes.
+# 2. We use F.interpolate with size=skip.shape[-2:] (rather than scale_factor=2) so odd-sized
+#    inputs still align perfectly with their skip features instead of being off by one.
+class _DecoderBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
+        #After the optional concat, the conv input has in_channels + skip_channels channels.
+        #When there's no skip (deepest two upsamples), skip_channels is 0.
+
+        #Here we calculate the total number of input channels to the conv block after concatenation.
+        total_in = in_channels + skip_channels
+
+        #Here we define the conv block that will process the upsampled features (and concatenated skip if available).
+        self.conv = nn.Sequential(
+            nn.Conv2d(total_in, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x, skip=None):
+        if skip is not None:
+            #Here we upsample x to the spatial size of the skip feature using bilinear interpolation. This ensures 
+            #that the upsampled features align perfectly with the skip features, and then we concatenate them.
+            x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
+            x = torch.cat([x, skip], dim=1)
+        else:
+            #Here we just upsample x by a factor of 2 using bilinear interpolation since there's no skip to align with.
+            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        #Apply the conv block to fuse the features (and reduce the channel count to out_channels).
+        return self.conv(x)
+
+
+#Here is the U-Net decoder using ResNet34Encoder. The encoder gives us features at strides 4, 8, 16, 32.
+#We start from the deepest (s32) and walk back up, fusing with each shallower skip in turn, then
+#do two more upsamples without skips to reach full input resolution. A final 1x1 conv projects
+#to the desired number of output channels (2 for binary, embedding_dim for the instance head).
+class ResNet34Decoder(nn.Module):
+    """
+    U-Net decoder. Consumes the [s4, s8, s16, s32] skip list produced by ResNet34Encoder
+    and outputs a dense map at full input resolution with `out_channels` channels.
+    """
+
+    def __init__(self, out_channels, encoder_channels=ResNet34Encoder.OUT_CHANNELS):
+        super().__init__()
+        c4, c8, c16, c32 = encoder_channels   #(64, 128, 256, 512) for ResNet34
+
+        #Channel widths going up: 512 -> 256 -> 128 -> 64 -> 32 -> 16. Modest decoder so the
+        #encoder remains the part with most of the model's capacity.
+        self.up1 = _DecoderBlock(c32, c16, 256)  # s32 -> s16, fuse with s16
+        self.up2 = _DecoderBlock(256, c8,  128)  # s16 -> s8,  fuse with s8
+        self.up3 = _DecoderBlock(128, c4,   64)  # s8  -> s4,  fuse with s4
+        self.up4 = _DecoderBlock( 64,  0,   32)  # s4  -> s2,  no skip available
+        self.up5 = _DecoderBlock( 32,  0,   16)  # s2  -> s1,  no skip available
+
+        #1x1 conv just rescales the channel count. No activation, so we return raw logits for
+        #the binary head and raw embeddings for the embedding head, matching what the loss expects.
+        self.final_conv = nn.Conv2d(16, out_channels, kernel_size=1)
+
+    def forward(self, skips, output_size):
+        s4, s8, s16, s32 = skips
+
+        x = self.up1(s32, s16)
+        x = self.up2(x,   s8)
+        x = self.up3(x,   s4)
+        x = self.up4(x)
+        x = self.up5(x)
+
+        #Safety: if the input dimensions weren't a clean multiple of 32, the cumulative bilinear
+        #upsamples might land one pixel short. Force-resize to the exact input shape.
+        if x.shape[-2:] != tuple(output_size):
+            x = F.interpolate(x, size=output_size, mode='bilinear', align_corners=False)
+
+        return self.final_conv(x)
+
+
+#Drop-in replacement for LaneNet that uses the ResNet34 encoder + U-Net decoders. The forward
+#contract is identical: returns (binary_logits, embedding) so loss.py and postprocess.py don't
+#need to change. The encoder runs once per forward and feeds both decoders, which saves a chunk
+#of compute compared to running ResNet34 twice.
+class LaneNetResNet34(nn.Module):
+    """
+    LaneNet variant with an ImageNet-pretrained ResNet34 encoder and two parallel U-Net
+    decoders (binary segmentation + instance embedding).
+
+    Keyword arguments:
+    - embedding_dim (int): channels in the instance embedding output (default 4).
+    - pretrained (bool): load ImageNet weights into the encoder (default True).
+    """
+
+    def __init__(self, embedding_dim=4, pretrained=True):
+        super().__init__()
+
+        self.encoder = ResNet34Encoder(pretrained=pretrained)
+        enc_channels = ResNet34Encoder.OUT_CHANNELS
+
+        self.binary_decoder    = ResNet34Decoder(out_channels=2,             encoder_channels=enc_channels)
+        self.embedding_decoder = ResNet34Decoder(out_channels=embedding_dim, encoder_channels=enc_channels)
+
+    def forward(self, x):
+        #Remember the input H, W so the decoder can guarantee the output matches exactly.
+        input_size = x.shape[-2:]
+
+        skips = self.encoder(x)                                  # [s4, s8, s16, s32]
+        binary_logits = self.binary_decoder(skips,    output_size=input_size)
+        embedding     = self.embedding_decoder(skips, output_size=input_size)
+
+        return binary_logits, embedding

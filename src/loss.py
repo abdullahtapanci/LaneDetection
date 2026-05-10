@@ -32,7 +32,7 @@ def compute_binary_loss(binary_logits, binary_mask, class_weights=None):
 
 
 def discriminative_loss_single(embedding, instance_mask,
-                               delta_var=0.5, delta_dist=3.0,
+                               delta_var=0.3, delta_dist=1.5,
                                alpha=1.0, beta=1.0, gamma=0.001):
     """
     embedding:     (D, H, W) — raw embeddings for one image

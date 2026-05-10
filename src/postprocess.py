@@ -8,7 +8,7 @@ from sklearn.pipeline import make_pipeline
 
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
-                   clustering_algorithm='dbscan', using_bev=False):
+                   clustering_algorithm='dbscan'):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115

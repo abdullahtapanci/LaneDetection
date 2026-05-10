@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import random
 
-def transform_image(image_path, bin_path, inst_path):
+def transform_image(image_path, bin_path, inst_path, training=True):
     #Here we load and resize image
     img = cv2.imread(image_path)
     img = cv2.resize(img, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT))
@@ -23,10 +23,12 @@ def transform_image(image_path, bin_path, inst_path):
     inst_mask = cv2.resize(inst_mask, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT), interpolation=cv2.INTER_NEAREST)
 
     #This part contains the data augmentation steps.
-    img = random_brightness(img)
-    img = random_blur(img)
-    img, bin_mask, inst_mask = random_translate(img, bin_mask, inst_mask)
-    img, bin_mask, inst_mask = random_perspective(img, bin_mask, inst_mask)
+    if training:
+        img = color_jitter(img, brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)
+        img = random_blur(img)
+        img, bin_mask, inst_mask = random_horizontal_flip(img, bin_mask, inst_mask, p=0.5)
+        img, bin_mask, inst_mask = random_translate(img, bin_mask, inst_mask)
+        img, bin_mask, inst_mask = random_perspective(img, bin_mask, inst_mask)
 
     #Here we normalize the image
     img = img.astype(np.float32) / 255.0
@@ -69,9 +71,10 @@ def seeTransforms(image_path, bin_path, inst_path):
     inst_mask = cv2.imread(inst_path, cv2.IMREAD_GRAYSCALE)
     inst_mask = cv2.resize(inst_mask, (cfg.IMAGE_WIDTH, cfg.IMAGE_HEIGHT), interpolation=cv2.INTER_NEAREST)
 
-    #This part contains the data augmentation steps.
-    img = random_brightness(img)
+    #This part contains the data augmentation steps. Mirror the training pipeline used in transform_image.
+    img = color_jitter(img, brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)
     img = random_blur(img)
+    img, bin_mask, inst_mask = random_horizontal_flip(img, bin_mask, inst_mask, p=0.5)
     img, bin_mask, inst_mask = random_translate(img, bin_mask, inst_mask)
     img, bin_mask, inst_mask = random_perspective(img, bin_mask, inst_mask)
 
@@ -81,16 +84,63 @@ def seeTransforms(image_path, bin_path, inst_path):
 
 
 #Data Augmentation functions
-def random_brightness(img):
-    if random.random() < 0.6: # Increased probability slightly
-        # Range (0.5, 1.5) allows for much darker and much brighter images
-        factor = random.uniform(0.3, 1.8)
-        
-        # Using cv2.convertScaleAbs is faster than manual astype and clipping
-        # alpha is the scale factor, beta is an offset (set to 0 here)
-        img = cv2.convertScaleAbs(img, alpha=factor, beta=0)
-        
-    return img
+def color_jitter(img, brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1):
+    """
+    Mirrors torchvision.transforms.ColorJitter for a uint8 RGB numpy image.
+    Each parameter f sets a sampling range:
+        brightness factor ~ U(1-f, 1+f)
+        contrast   factor ~ U(1-f, 1+f)
+        saturation factor ~ U(1-f, 1+f)
+        hue        shift  ~ U(-h, h)  in fraction of full hue circle
+
+    The four ops are applied in a random order each call, like torchvision.
+    Input/output are uint8 RGB so the rest of the pipeline (normalization)
+    stays unchanged.
+    """
+    img = img.astype(np.float32)
+    ops = ['brightness', 'contrast', 'saturation', 'hue']
+    random.shuffle(ops)
+
+    for op in ops:
+        if op == 'brightness' and brightness > 0:
+            factor = random.uniform(max(0.0, 1 - brightness), 1 + brightness)
+            img = np.clip(img * factor, 0, 255)
+
+        elif op == 'contrast' and contrast > 0:
+            factor = random.uniform(max(0.0, 1 - contrast), 1 + contrast)
+            #Contrast is rescaling around the per-channel mean — same convention as torchvision.
+            mean = img.mean(axis=(0, 1), keepdims=True)
+            img = np.clip((img - mean) * factor + mean, 0, 255)
+
+        elif op == 'saturation' and saturation > 0:
+            factor = random.uniform(max(0.0, 1 - saturation), 1 + saturation)
+            #Blend with the grayscale version of the image. factor=0 → pure grayscale, factor=1 → original.
+            gray = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
+            gray = gray[..., None]   #(H, W, 1) so it broadcasts across the 3 channels
+            img = np.clip(gray + (img - gray) * factor, 0, 255)
+
+        elif op == 'hue' and hue > 0:
+            #OpenCV stores H in [0, 180) for 8-bit. Shift cyclically.
+            shift = int(round(random.uniform(-hue, hue) * 180))
+            hsv = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2HSV)
+            hsv[..., 0] = (hsv[..., 0].astype(np.int16) + shift) % 180
+            img = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32)
+
+    return img.astype(np.uint8)
+
+
+def random_horizontal_flip(img, bin_mask, inst_mask, p=0.5):
+    """
+    Flip image and both masks together so they stay aligned. Lane instance IDs
+    don't carry semantic meaning (the discriminative loss only groups by unique
+    ID), so flipping a left-most lane to right-most is fine.
+    """
+    if random.random() < p:
+        img       = cv2.flip(img, 1)
+        bin_mask  = cv2.flip(bin_mask, 1)
+        inst_mask = cv2.flip(inst_mask, 1)
+    return img, bin_mask, inst_mask
+
 
 def random_blur(img):
 
@@ -153,7 +203,7 @@ def random_perspective(img, bin_mask, inst_mask):
             [w,h]
         ])
 
-        delta = 30
+        delta = 10
 
         dst = np.float32([
             [random.randint(0, delta), random.randint(0, delta)],
