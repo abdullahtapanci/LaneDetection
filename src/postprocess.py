@@ -8,7 +8,7 @@ from sklearn.pipeline import make_pipeline
 
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
-                   clustering_algorithm='dbscan', y_min_ratio=0.5):
+                   clustering_algorithm='dbscan', horizon_min_pixels=5):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -40,9 +40,9 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
     clustering_algorithm: This is the clustering algorithm to use for grouping lane pixels based on their embeddings. 
     It can be either 'dbscan' or 'meanshift'. 
 
-    y_min_ratio: Vertical cutoff as a fraction of image height. Pixels with y < H * y_min_ratio are zeroed out
-    before clustering, removing horizon/sky noise. Set to 0.0 to disable. Typical values: 0.4-0.5 for highway
-    dashcam views, 0.55-0.6 for cameras mounted higher up. Default 0.5.
+    horizon_min_pixels: Dynamic horizon cutoff. We scan rows top-to-bottom and find the first row that has at least
+    this many lane pixels in it. Rows above that are treated as horizon/sky noise and zeroed out before clustering.
+    Adapts per-image to the actual horizon location. Set to None to disable. Default 5.
     """
 
 
@@ -74,14 +74,15 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
         prob_lane = e[1] / e.sum(axis=0)
         binary_mask = prob_lane > threshold
     
-    #Mask out the top portion of the image. The horizon region (sky, distant buildings,
-    #mountains, vanishing-point clutter) tends to produce spurious lane pixels that confuse
-    #both DBSCAN clustering and polynomial fitting. y_min_ratio=0.5 keeps only the bottom
-    #half of the image; set y_min_ratio=0.0 to disable.
-    if 0.0 < y_min_ratio < 1.0:
-        H = binary_mask.shape[0]
-        y_cutoff = int(H * y_min_ratio)
-        binary_mask[:y_cutoff, :] = False
+
+    if horizon_min_pixels is not None and horizon_min_pixels > 0:
+        row_counts = binary_mask.sum(axis=1)               # (H,) lane pixels per row
+        significant = np.where(row_counts >= horizon_min_pixels)[0]
+        if len(significant) > 0:
+            y_cutoff = int(significant[0])
+            print(f"horizon cutoff: y={y_cutoff}/{binary_mask.shape[0]} "
+                  f"({y_cutoff/binary_mask.shape[0]:.2%})")
+            binary_mask[:y_cutoff, :] = False
 
 
 
