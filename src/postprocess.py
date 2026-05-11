@@ -9,7 +9,7 @@ from sklearn.pipeline import make_pipeline
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
                    clustering_algorithm='dbscan', horizon_min_pixels=5, horizon_padding=10,
-                   min_blob_pixels=30):
+                   min_blob_pixels=30, newVersion = True):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -119,97 +119,165 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
 
 
 
-
-
-
-    #Step 2: Clustering lane pixels by their embedding vectors
-
-    #We have to drop the batch dimension from the embedding as well.
-    if embedding.ndim == 4:
-        embedding = embedding[0]
-
-    #Here we just get the (y, x) coordinates of the pixels where the binary mask is True.
-    ys, xs = np.where(binary_mask)
-    #If there are no lane pixels detected then ys and xs will be empty arrays.
-    if len(ys) == 0:
-        return []
-
-    # : means take all embedding dimensions, and ys, xs are the coordinates of the lane pixels. Here we get the 
-    #embeeding values for the given lane pixel coordinates.
-    features = embedding[:, ys, xs] # shape (D, N)
-    #We need to transpose the features to have shape (N, D) because DBSCAN expects samples as rows and features as columns.
-    features = features.T  #shape (N, D) for DBSCAN
-    #Example matrix would be like this:
-    #           Dim 0    Dim 1    Dim 2    Dim 3
-    #           (Ch 0)   (Ch 1)   (Ch 2)   (Ch 3)
-    #          ___________________________________
-    # Pixel 1 |  8.26,  -2.14,   5.50,  -11.91  |  
-    # Pixel 2 |  8.10,  -2.20,   5.45,  -11.85  |  
-    # Pixel 3 | -6.53,   9.44,  -1.20,    4.10  |  
-    # Pixel 4 | -6.40,   9.30,  -1.15,    4.05  |  
-    # ...     |  ...     ...     ...      ...  
-    # Pixel N |  0.06,  -0.11,   1.22,   -3.44  |  
-    #          -----------------------------------
-
-    labels = None
-    if clustering_algorithm == 'dbscan':
-        #Here we apply DBSCAN clustering to the features. DBSCAN will group together pixels that have similar 
-        #embedding vectors and mark outliers as noise (label -1). 
-        db = DBSCAN(eps=eps, min_samples=min_samples)
-        labels = db.fit_predict(features)
+    if newVersion:
+            #Step 2: Hybrid clustering — connected components + per-blob embedding clustering.
+        #
+        #Why hybrid: pure connected components can't merge dashed lane segments or lanes split
+        #by occlusion. Pure DBSCAN on pixel-level embeddings is slow and can wrongly merge
+        #spatially-separated lanes when their embeddings happen to be similar.
+        #
+        #Hybrid steps:
+        #  1. Find spatial blobs via connected components.
+        #  2. Compute one mean embedding per blob.
+        #  3. Cluster blobs by their mean embeddings (tiny DBSCAN, ~free).
+        #  4. Each blob-cluster = one lane. Merge pixels from constituent blobs.
+        if embedding.ndim == 4:
+            embedding = embedding[0]
+        
+        mask_uint8 = binary_mask.astype(np.uint8)
+        n_labels, label_map, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+        
+        #Per-blob: collect (y, x) pixel coords + mean embedding vector.
+        blob_pixels = []     # list of (ys, xs) per blob
+        blob_means  = []     # list of mean embedding per blob
+        for i in range(1, n_labels):
+            if stats[i, cv2.CC_STAT_AREA] < min_blob_pixels:
+                continue
+            ys_b, xs_b = np.where(label_map == i)
+            emb_b = embedding[:, ys_b, xs_b]                # (D, n_blob)
+            blob_pixels.append((ys_b, xs_b))
+            blob_means.append(emb_b.mean(axis=1))           # (D,)
+        
+        if len(blob_means) == 0:
+            return []
+        
+        #Cluster blobs by their mean embedding. Each blob is a single 4-D point now, so DBSCAN
+        #here runs on N=10-30 points instead of N=thousands — orders of magnitude faster.
+        #min_samples=1 because every blob should belong to *some* lane; we let eps decide grouping.
+        blob_means_np = np.array(blob_means)
+        if clustering_algorithm == 'dbscan':
+            db = DBSCAN(eps=eps, min_samples=1)
+            blob_labels = db.fit_predict(blob_means_np)
+        else:
+            ms = MeanShift(bandwidth=bandwidth, bin_seeding=False, n_jobs=-1)
+            blob_labels = ms.fit_predict(blob_means_np)
+        
+        #Step 3: Merge blobs within the same lane and fit polynomials.
+        lanes = []
+        for cid in np.unique(blob_labels):
+            if cid == -1:
+                continue
+            
+            #Concatenate pixels from all blobs assigned to this lane.
+            member_indices = np.where(blob_labels == cid)[0]
+            cys = np.concatenate([blob_pixels[i][0] for i in member_indices])
+            cxs = np.concatenate([blob_pixels[i][1] for i in member_indices])
+            
+            if len(cys) < min_pixels:
+                continue
+            
+            coeffs = np.polyfit(cys, cxs, deg=poly_degree)
+            lanes.append({
+                'cluster_id': int(cid),
+                'poly':       coeffs,
+                'y_range':    (int(cys.min()), int(cys.max())),
+                'pixels':     np.stack([cys, cxs], axis=1),
+            })
+        
+        lanes.sort(key=lambda l: l['pixels'][:, 1].mean())
+        return lanes
+    
     else:
-        ms = MeanShift(bandwidth=bandwidth, bin_seeding=True, n_jobs=-1)
-        labels = ms.fit_predict(features)
+
+
+        #Step 2: Clustering lane pixels by their embedding vectors
+
+        #We have to drop the batch dimension from the embedding as well.
+        if embedding.ndim == 4:
+            embedding = embedding[0]
+
+        #Here we just get the (y, x) coordinates of the pixels where the binary mask is True.
+        ys, xs = np.where(binary_mask)
+        #If there are no lane pixels detected then ys and xs will be empty arrays.
+        if len(ys) == 0:
+            return []
+
+        # : means take all embedding dimensions, and ys, xs are the coordinates of the lane pixels. Here we get the 
+        #embeeding values for the given lane pixel coordinates.
+        features = embedding[:, ys, xs] # shape (D, N)
+        #We need to transpose the features to have shape (N, D) because DBSCAN expects samples as rows and features as columns.
+        features = features.T  #shape (N, D) for DBSCAN
+        #Example matrix would be like this:
+        #           Dim 0    Dim 1    Dim 2    Dim 3
+        #           (Ch 0)   (Ch 1)   (Ch 2)   (Ch 3)
+        #          ___________________________________
+        # Pixel 1 |  8.26,  -2.14,   5.50,  -11.91  |  
+        # Pixel 2 |  8.10,  -2.20,   5.45,  -11.85  |  
+        # Pixel 3 | -6.53,   9.44,  -1.20,    4.10  |  
+        # Pixel 4 | -6.40,   9.30,  -1.15,    4.05  |  
+        # ...     |  ...     ...     ...      ...  
+        # Pixel N |  0.06,  -0.11,   1.22,   -3.44  |  
+        #          -----------------------------------
+
+        labels = None
+        if clustering_algorithm == 'dbscan':
+            #Here we apply DBSCAN clustering to the features. DBSCAN will group together pixels that have similar 
+            #embedding vectors and mark outliers as noise (label -1). 
+            db = DBSCAN(eps=eps, min_samples=min_samples)
+            labels = db.fit_predict(features)
+        else:
+            ms = MeanShift(bandwidth=bandwidth, bin_seeding=True, n_jobs=-1)
+            labels = ms.fit_predict(features)
+        
+        #lables is a 1D array of length N (number of lane pixels) where each element is the cluster ID assigned by DBSCAN.
+        #For example, labels = np.array([0, 0, 0, -1, 0, 1, 1, 1, 1, -1])
+
+
+
+
+
+
+
+        #Step 3: Fitting polynomial curves to each cluster of lane pixels
+
+        lanes = []
+        for cid in np.unique(labels):
+
+            #Ignore the noise points labeled as -1 by DBSCAN
+            if cid == -1:
+                continue
+
+            #Get the mask for the current cluster ID. This will give us a boolean array where True 
+            #corresponds to pixels belonging to the current cluster.
+            mask = labels == cid
+
+            #Here we check if the number of pixels in the cluster is less than the minimum required pixels. 
+            if mask.sum() < min_pixels:
+                continue
+
+            #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
+            cys, cxs = ys[mask], xs[mask]
+
+            #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
+            coeffs = np.polyfit(cys, cxs, deg=poly_degree)
+
+            #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
+            #the range of y values, and the pixel coordinates.
+            lanes.append({
+                'cluster_id': int(cid),
+                'poly':       coeffs,
+                'y_range':    (int(cys.min()), int(cys.max())),
+                'pixels':     np.stack([cys, cxs], axis=1),
+            })
+
+        #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
+        #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
+        #I will just sort by the mean x coordinate of the pixels in the lane cluster.
+        lanes.sort(key=lambda l: l['pixels'][:, 1].mean())
+
+        return lanes
     
-    #lables is a 1D array of length N (number of lane pixels) where each element is the cluster ID assigned by DBSCAN.
-    #For example, labels = np.array([0, 0, 0, -1, 0, 1, 1, 1, 1, -1])
-
-
-
-
-
-
-
-    #Step 3: Fitting polynomial curves to each cluster of lane pixels
-
-    lanes = []
-    for cid in np.unique(labels):
-
-        #Ignore the noise points labeled as -1 by DBSCAN
-        if cid == -1:
-            continue
-
-        #Get the mask for the current cluster ID. This will give us a boolean array where True 
-        #corresponds to pixels belonging to the current cluster.
-        mask = labels == cid
-
-        #Here we check if the number of pixels in the cluster is less than the minimum required pixels. 
-        if mask.sum() < min_pixels:
-            continue
-
-        #Get the (y, x) coordinates of the pixels in the current cluster using the mask.
-        cys, cxs = ys[mask], xs[mask]
-
-        #We fit a polynomial of the specified degree to the (y, x) coordinates of the pixels in the cluster.
-        coeffs = np.polyfit(cys, cxs, deg=poly_degree)
-
-        #We create a dictionary for the current lane cluster containing the cluster ID, polynomial coefficients, 
-        #the range of y values, and the pixel coordinates.
-        lanes.append({
-            'cluster_id': int(cid),
-            'poly':       coeffs,
-            'y_range':    (int(cys.min()), int(cys.max())),
-            'pixels':     np.stack([cys, cxs], axis=1),
-        })
-
-    #Sort lanes left-to-right by their average x position (useful for ego-lane logic)
-    #I can change this later to something like this lanes.sort(key=lambda l: l['poly'](l['y_range'][1])) but for now 
-    #I will just sort by the mean x coordinate of the pixels in the lane cluster.
-    lanes.sort(key=lambda l: l['pixels'][:, 1].mean())
-
-    return lanes
     
-
 
 def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
     """
