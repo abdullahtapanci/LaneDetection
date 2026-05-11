@@ -5,3 +5,4 @@ __pycache__/
 *.pth
 src/exampleVideo
 .claude/
+venv/
