@@ -101,7 +101,7 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
             binary_mask[:y_cutoff, :] = False
 
     
-     #Spatial blob filter. Find connected components in the binary mask and discard any blob
+    #Spatial blob filter. Find connected components in the binary mask and discard any blob
     #with fewer than min_blob_pixels pixels. This runs in image space, BEFORE the embedding
     #clustering — so small noise blobs (lane-mark-like pixels on signs, distant cars, debris)
     #never get a chance to merge into a real lane cluster and pull the polynomial fit off-track.
@@ -120,7 +120,7 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
 
 
     if newVersion:
-            #Step 2: Hybrid clustering — connected components + per-blob embedding clustering.
+        #Step 2: Hybrid clustering — connected components + per-blob embedding clustering.
         #
         #Why hybrid: pure connected components can't merge dashed lane segments or lanes split
         #by occlusion. Pure DBSCAN on pixel-level embeddings is slow and can wrongly merge
@@ -277,7 +277,7 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
 
         return lanes
     
-    
+
 
 def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
     """
