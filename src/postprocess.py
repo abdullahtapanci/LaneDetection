@@ -8,7 +8,8 @@ from sklearn.pipeline import make_pipeline
 
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
-                   clustering_algorithm='dbscan', horizon_min_pixels=5, horizon_padding=10):
+                   clustering_algorithm='dbscan', horizon_min_pixels=5, horizon_padding=10,
+                   min_blob_pixels=30):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -48,6 +49,11 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
     horizon_padding: Extra rows to cut below the detected horizon, in pixels. Positive values are more aggressive
     (cut more of the image), negative values are more lenient. Default 10. Useful because the first row to pass
     the threshold often still has a few noisy pixels — a small padding gives a cleaner cutoff.
+
+    min_blob_pixels: Spatial blob filter. Connected components in the binary mask with fewer than this many pixels
+    are removed BEFORE the embedding clustering step. This prevents small noise blobs from being merged into real
+    lane clusters by DBSCAN, which would distort the polynomial fit. Different from min_pixels (which filters
+    AFTER clustering, in embedding-cluster space). Set to None to disable. Default 30.
     """
 
 
@@ -93,6 +99,22 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
             y_cutoff = int(significant[0]) + horizon_padding
             y_cutoff = max(0, min(y_cutoff, H))
             binary_mask[:y_cutoff, :] = False
+
+    
+     #Spatial blob filter. Find connected components in the binary mask and discard any blob
+    #with fewer than min_blob_pixels pixels. This runs in image space, BEFORE the embedding
+    #clustering — so small noise blobs (lane-mark-like pixels on signs, distant cars, debris)
+    #never get a chance to merge into a real lane cluster and pull the polynomial fit off-track.
+    #
+    #Different from min_pixels (which filters AFTER DBSCAN, in embedding-cluster space).
+    if min_blob_pixels is not None and min_blob_pixels > 0:
+        mask_uint8 = binary_mask.astype(np.uint8)
+        num_labels, label_map, stats, _ = cv2.connectedComponentsWithStats(
+            mask_uint8, connectivity=8)
+        #stats[:, cv2.CC_STAT_AREA] is pixel count per component. Component 0 is the background.
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] < min_blob_pixels:
+                binary_mask[label_map == i] = False
 
 
 
