@@ -8,7 +8,7 @@ from sklearn.pipeline import make_pipeline
 
 def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5, 
                    min_samples=50, poly_degree=2, min_pixels=100, bandwidth=1.0, 
-                   clustering_algorithm='dbscan', horizon_min_pixels=5):
+                   clustering_algorithm='dbscan', horizon_min_pixels=5, horizon_padding=10):
     """
     Binary logits: It has shape (1,2,H,W). Example shape binary_logits -> (1, 2, 256, 512) torch.float32 min=-6.530 max=8.266 mean=0.069
     Embedding: It has shape (1,4,H,W). Example shape embedding -> (1, 4, 256, 512) torch.float32 min=-11.913 max=10.448 mean=-0.115
@@ -39,10 +39,15 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
 
     clustering_algorithm: This is the clustering algorithm to use for grouping lane pixels based on their embeddings. 
     It can be either 'dbscan' or 'meanshift'. 
-
+    
+    
     horizon_min_pixels: Dynamic horizon cutoff. We scan rows top-to-bottom and find the first row that has at least
-    this many lane pixels in it. Rows above that are treated as horizon/sky noise and zeroed out before clustering.
-    Adapts per-image to the actual horizon location. Set to None to disable. Default 5.
+    this many lane pixels. Rows above that are treated as horizon/sky noise and zeroed out before clustering.
+    Set to None to disable. Default 5.
+
+    horizon_padding: Extra rows to cut below the detected horizon, in pixels. Positive values are more aggressive
+    (cut more of the image), negative values are more lenient. Default 10. Useful because the first row to pass
+    the threshold often still has a few noisy pixels — a small padding gives a cleaner cutoff.
     """
 
 
@@ -75,13 +80,18 @@ def my_postprocess(binary_logits, embedding, threshold=None, eps=1.5,
         binary_mask = prob_lane > threshold
     
 
+    #Dynamically find the horizon by looking at row-wise lane pixel density. The topmost row
+    #with at least horizon_min_pixels lane pixels marks where "real" lane content starts.
+    #horizon_padding lets us cut additional rows beyond that — useful because the first row
+    #to pass the threshold is often still partly horizon noise. Clamped to [0, H] so a large
+    #padding can't break the masking.
     if horizon_min_pixels is not None and horizon_min_pixels > 0:
-        row_counts = binary_mask.sum(axis=1)               # (H,) lane pixels per row
+        H = binary_mask.shape[0]
+        row_counts = binary_mask.sum(axis=1)
         significant = np.where(row_counts >= horizon_min_pixels)[0]
         if len(significant) > 0:
-            y_cutoff = int(significant[0])
-            print(f"horizon cutoff: y={y_cutoff}/{binary_mask.shape[0]} "
-                  f"({y_cutoff/binary_mask.shape[0]:.2%})")
+            y_cutoff = int(significant[0]) + horizon_padding
+            y_cutoff = max(0, min(y_cutoff, H))
             binary_mask[:y_cutoff, :] = False
 
 
