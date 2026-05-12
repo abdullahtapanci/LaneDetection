@@ -399,6 +399,106 @@ def draw_lanes(image_rgb, lanes, color_palette=None, thickness=3):
 
 
 
+
+
+
+
+
+
+
+import cv2
+import numpy as np
+
+def binary_mask_to_lanes(
+    binary_logits,
+    threshold=0.5,
+    min_blob_pixels=80,
+    min_lane_pixels=150,
+    poly_degree=2,
+    horizon_min_pixels=5,
+    horizon_padding=10,
+):
+    """
+    Uses only binary_logits to produce lane curves.
+    No embedding, no DBSCAN, no MeanShift.
+
+    Returns lanes in the same format as draw_lanes():
+        {
+            "cluster_id": int,
+            "poly": coeffs,
+            "y_range": (y_min, y_max),
+            "pixels": np.array of (y, x)
+        }
+    """
+
+    if binary_logits.ndim == 4:
+        binary_logits = binary_logits[0]
+
+    # binary_logits: (2, H, W)
+    e = np.exp(binary_logits - binary_logits.max(axis=0, keepdims=True))
+    prob_lane = e[1] / e.sum(axis=0)
+
+    binary_mask = prob_lane > threshold
+
+    if horizon_min_pixels is not None and horizon_min_pixels > 0:
+        H = binary_mask.shape[0]
+        row_counts = binary_mask.sum(axis=1)
+        significant = np.where(row_counts >= horizon_min_pixels)[0]
+
+        if len(significant) > 0:
+            y_cutoff = int(significant[0]) + horizon_padding
+            y_cutoff = max(0, min(y_cutoff, H))
+            binary_mask[:y_cutoff, :] = False
+
+    mask_uint8 = binary_mask.astype(np.uint8)
+
+    num_labels, label_map, stats, _ = cv2.connectedComponentsWithStats(
+        mask_uint8,
+        connectivity=8,
+    )
+
+    lanes = []
+
+    for label_id in range(1, num_labels):
+        area = stats[label_id, cv2.CC_STAT_AREA]
+
+        if area < min_blob_pixels:
+            continue
+
+        ys, xs = np.where(label_map == label_id)
+
+        if len(ys) < min_lane_pixels:
+            continue
+
+        y_min = int(ys.min())
+        y_max = int(ys.max())
+
+        if y_max <= y_min:
+            continue
+
+        coeffs = np.polyfit(ys, xs, deg=poly_degree)
+
+        lanes.append({
+            "cluster_id": int(label_id),
+            "poly": coeffs,
+            "y_range": (y_min, y_max),
+            "pixels": np.stack([ys, xs], axis=1),
+        })
+
+    lanes.sort(key=lambda lane: lane["pixels"][:, 1].mean())
+
+    return lanes, binary_mask
+
+
+
+
+
+
+
+
+
+
+
 # import numpy as np
 # from sklearn.cluster import DBSCAN, MeanShift
 # import cv2
