@@ -272,11 +272,7 @@ class DownsamplingBottleneck(nn.Module):
         #Main branch channel padding
         n, ch_ext, h, w = ext.size()
         ch_main = main.size()[1]
-        padding = torch.zeros(n, ch_ext - ch_main, h, w)
-
-        #Before concatenating, check if main is on the CPU or GPU and convert padding accordingly
-        if main.is_cuda:
-            padding = padding.cuda()
+        padding = main.new_zeros(n, ch_ext - ch_main, h, w)
 
         #Concatenate
         main = torch.cat((main, padding), 1)

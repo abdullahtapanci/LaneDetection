@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.encoder import ENetEncoder, RegularBottleneck, UpsamplingBottleneck
-from src.models.ResNetEncoder import ResNet34Encoder
+from DeepLearningTechnique.src.models.encoder import ENetEncoder, RegularBottleneck, UpsamplingBottleneck
+from DeepLearningTechnique.src.models.ResNetEncoder import ResNet34Encoder
 
 
 class LaneNetDecoder(nn.Module):

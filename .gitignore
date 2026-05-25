@@ -1,8 +1,21 @@
-checkpoints/
+# Python
 __pycache__/
-*.ipynb_checkpoints/
-.DS_Store
-*.pth
-src/exampleVideo
-.claude/
+*.py[cod]
 venv/
+
+# OS/editor
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# Model/checkpoint artifacts
+checkpoints/
+*.pt
+*.pth
+
+# Large local media/artifacts
+exampleVideos/
+ImageProcessingTechnique/*.mp4
+ImageProcessingTechnique/*.mov

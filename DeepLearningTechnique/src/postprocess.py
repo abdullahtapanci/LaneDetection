@@ -8,14 +8,19 @@ from sklearn.cluster import DBSCAN
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _binary_mask(binary_logits: np.ndarray) -> np.ndarray:
+def _binary_mask(binary_logits: np.ndarray, lane_probability_threshold: float = 0.8) -> np.ndarray:
     """
-    Convert model binary output to a boolean mask.
+    Convert model binary output to a boolean mask using lane probability.
 
     binary_logits: (2, H, W)  – raw logits (class-0 = background, class-1 = lane)
+    lane_probability_threshold:
+        Minimum softmax probability required to mark a pixel as lane.
     Returns:       (H, W)     – bool array, True = lane pixel
     """
-    return binary_logits.argmax(axis=0).astype(bool)
+    logits = binary_logits - binary_logits.max(axis=0, keepdims=True)
+    exp_logits = np.exp(logits)
+    probs = exp_logits / exp_logits.sum(axis=0, keepdims=True)
+    return probs[1] >= lane_probability_threshold
 
 
 def _find_horizon_row(mask: np.ndarray, min_pixels: int = 5) -> int:
@@ -52,6 +57,7 @@ def my_postprocess(
     embedding: np.ndarray,
     # ── binary mask settings ──────────────────────────────────────────────
     min_blob_pixels: int   = 30,
+    lane_probability_threshold: float = 0.8,
     # ── horizon settings ──────────────────────────────────────────────────
     horizon_min_pixels: int = 5,
     horizon_padding: int    = 20,
@@ -76,6 +82,8 @@ def my_postprocess(
         Instance embedding map from the embedding head.
     min_blob_pixels : int
         Minimum connected-component area to keep (noise filter).
+    lane_probability_threshold : float
+        Minimum lane-class softmax probability needed to keep a lane pixel.
     horizon_min_pixels : int
         A row needs ≥ this many lane pixels to count as the horizon.
     horizon_padding : int
@@ -106,7 +114,7 @@ def my_postprocess(
     H, W = binary_logits.shape[1], binary_logits.shape[2]
 
     # ── 1. Binary mask ────────────────────────────────────────────────────
-    mask = _binary_mask(binary_logits)          # (H, W) bool
+    mask = _binary_mask(binary_logits, lane_probability_threshold)          # (H, W) bool
 
     # ── 2. Remove small blobs (salt-and-pepper noise) ─────────────────────
     mask = _filter_small_blobs(mask, min_blob_pixels)

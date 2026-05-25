@@ -1,5 +1,5 @@
 import cv2
-import src.config as cfg
+import DeepLearningTechnique.src.config as cfg
 import numpy as np
 import torch
 import random

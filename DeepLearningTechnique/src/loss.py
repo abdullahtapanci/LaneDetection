@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import src.config as cfg
+import DeepLearningTechnique.src.config as cfg
 
 #Normally in lane detaction, about 95% of pixels are background and only 5% are lane markings.
 #This class imbalance can cause the model to be biased towards predicting the majority class (background)
