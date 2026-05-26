@@ -99,23 +99,28 @@ def get_hsv_preset_for_media(media_name):
 
 def process_frame(
     frame_bgr,
-    lower_hsv=DEFAULT_LOWER_HSV,
-    upper_hsv=DEFAULT_UPPER_HSV,
+    lower_hsv=None,
+    upper_hsv=None,
     perspective_preset=None,
+    perspective_points=None,
     media_name=None,
     window_half_width=50,
     window_height=40,
 ):
     frame = cv2.resize(frame_bgr, FRAME_SIZE)
     width, height = FRAME_SIZE
-    if perspective_preset is None:
-        perspective_preset = get_perspective_preset_for_media(media_name)
-    if lower_hsv == DEFAULT_LOWER_HSV and upper_hsv == DEFAULT_UPPER_HSV:
+    if perspective_points is not None:
+        pts1 = np.float32(perspective_points)
+    else:
+        if perspective_preset is None:
+            perspective_preset = get_perspective_preset_for_media(media_name)
+        pts1 = _preset_points(perspective_preset)
+
+    if lower_hsv is None or upper_hsv is None:
         hsv_preset = get_hsv_preset_for_media(media_name)
         lower_hsv = hsv_preset["lower"]
         upper_hsv = hsv_preset["upper"]
 
-    pts1 = _preset_points(perspective_preset)
     pts2 = np.float32([[0, 0], [0, height], [width, 0], [width, height]])
 
     matrix = cv2.getPerspectiveTransform(pts1, pts2)

@@ -1,4 +1,7 @@
 import sys
+import importlib
+import json
+import re
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -11,6 +14,7 @@ sys.path.insert(0, str(DEEP_LEARNING_DIR))
 import streamlit as st
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 import time
 from lane_warner import (
@@ -21,12 +25,20 @@ from lane_warner import (
 )
 from DeepLearningTechnique.src.models.lanenet import LaneNet, LaneNetResNet34
 from DeepLearningTechnique.src.postprocess import my_postprocess, draw_lanes
-from ImageProcessingTechnique.processor import process_frame
+import ImageProcessingTechnique.processor as image_processor
+
+image_processor = importlib.reload(image_processor)
+FRAME_SIZE = image_processor.FRAME_SIZE
+PERSPECTIVE_PRESETS = image_processor.PERSPECTIVE_PRESETS
+get_hsv_preset_for_media = image_processor.get_hsv_preset_for_media
+get_perspective_preset_for_media = image_processor.get_perspective_preset_for_media
+process_frame = image_processor.process_frame
 
 st.set_page_config(page_title="Lane Detection", layout="wide")
 st.title("Real Time Lane Detection")
 
 CHECKPOINT_DIR = APP_DIR / "checkpoints"
+RECOMMENDED_CHECKPOINT = "3.0_Pillar.pt"
 EXAMPLE_IMAGE_DIR = ROOT_DIR / "exampleImages"
 EXAMPLE_VIDEO_DIR = ROOT_DIR / "exampleVideos"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -51,9 +63,478 @@ def get_example_files(directory, extensions):
     )
 
 
+def format_number(value):
+    return f"{value:,}"
+
+
+def count_parameters(model):
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    return total, trainable
+
+
+def checkpoint_history_path(checkpoint_path):
+    version = checkpoint_path.stem.split("_", 1)[0]
+    return checkpoint_path.with_name(f"{version}_History.json")
+
+
+@st.cache_data
+def count_parameters_for_architecture(architecture):
+    if architecture == "LaneNet":
+        model = LaneNet(embedding_dim=4)
+    else:
+        model = LaneNetResNet34(embedding_dim=4, pretrained=False)
+    return count_parameters(model)
+
+
+@st.cache_data
+def load_checkpoint_metadata(checkpoint_path):
+    path = Path(checkpoint_path)
+    ckpt = torch.load(path, map_location="cpu")
+    epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    first_key = next(iter(state_dict), "")
+    architecture = "LaneNet" if first_key.startswith("encoder.initial_block") else "LaneNetResNet34"
+    total_params, trainable_params = count_parameters_for_architecture(architecture)
+    return {
+        "checkpoint": path.name,
+        "path": str(path),
+        "architecture": architecture,
+        "epoch": epoch,
+        "size_mb": path.stat().st_size / (1024 * 1024),
+        "parameters": total_params,
+        "trainable_parameters": trainable_params,
+    }
+
+
+@st.cache_data
+def load_checkpoint_history(history_path):
+    path = Path(history_path)
+    if not path.exists():
+        return None
+
+    with path.open("r", encoding="utf-8") as file:
+        rows = json.load(file)
+
+    if not isinstance(rows, list):
+        return None
+
+    clean_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("epoch") is not None
+    ]
+    if not clean_rows:
+        return None
+
+    best = max(clean_rows, key=lambda row: row.get("val_iou", float("-inf")))
+    lowest_val_loss = min(
+        clean_rows,
+        key=lambda row: row.get("val_total", float("inf")),
+    )
+    return {
+        "path": path.name,
+        "rows": clean_rows,
+        "best": best,
+        "latest": clean_rows[-1],
+        "lowest_val_loss": lowest_val_loss,
+    }
+
+
+def build_model_comparison(checkpoint_paths):
+    rows = []
+    curves = {}
+
+    for checkpoint_path in checkpoint_paths:
+        metadata = load_checkpoint_metadata(str(checkpoint_path))
+        history_path = checkpoint_history_path(checkpoint_path)
+        history = load_checkpoint_history(str(history_path))
+        is_recommended = metadata["checkpoint"] == RECOMMENDED_CHECKPOINT
+        row = {
+            "Checkpoint": metadata["checkpoint"],
+            "Recommended": is_recommended,
+            "Architecture": metadata["architecture"],
+            "Parameters": metadata["parameters"],
+            "Checkpoint epoch": metadata["epoch"],
+            "Size MB": metadata["size_mb"],
+            "History": history["path"] if history else "Missing",
+            "History epochs": len(history["rows"]) if history else None,
+            "Best val IoU": history["best"].get("val_iou") if history else None,
+            "Best IoU epoch": history["best"].get("epoch") if history else None,
+            "Lowest val loss": history["lowest_val_loss"].get("val_total") if history else None,
+            "Latest val IoU": history["latest"].get("val_iou") if history else None,
+            "Latest val loss": history["latest"].get("val_total") if history else None,
+        }
+        rows.append(row)
+
+        if history:
+            history_frame = pd.DataFrame(history["rows"]).set_index("epoch")
+            if "val_iou" in history_frame:
+                curves[f"{checkpoint_path.stem} val_iou"] = history_frame["val_iou"]
+            if "val_total" in history_frame:
+                curves[f"{checkpoint_path.stem} val_total"] = history_frame["val_total"]
+
+    return pd.DataFrame(rows), curves
+
+
+def show_model_comparison(checkpoint_paths, selected_checkpoint):
+    comparison_frame, curves = build_model_comparison(checkpoint_paths)
+    if comparison_frame.empty:
+        return
+
+    with st.expander("Model comparison", expanded=False):
+        best_iou = comparison_frame["Best val IoU"].max(skipna=True)
+        best_loss = comparison_frame["Lowest val loss"].min(skipna=True)
+        best_iou_row = comparison_frame.loc[
+            comparison_frame["Best val IoU"].idxmax()
+        ] if not pd.isna(best_iou) else None
+        best_loss_row = comparison_frame.loc[
+            comparison_frame["Lowest val loss"].idxmin()
+        ] if not pd.isna(best_loss) else None
+
+        recommended_row = comparison_frame[
+            comparison_frame["Checkpoint"].eq(RECOMMENDED_CHECKPOINT)
+        ]
+        recommended_label = (
+            RECOMMENDED_CHECKPOINT
+            if not recommended_row.empty
+            else "N/A"
+        )
+
+        compare_cols = st.columns(4)
+        compare_cols[0].metric("Checkpoints", len(comparison_frame))
+        compare_cols[1].metric(
+            "Best working model",
+            recommended_label,
+        )
+        compare_cols[2].metric(
+            "Best model by IoU",
+            best_iou_row["Checkpoint"] if best_iou_row is not None else "N/A",
+            f"{best_iou:.4f}" if best_iou_row is not None else None,
+        )
+        compare_cols[3].metric(
+            "Lowest validation loss",
+            best_loss_row["Checkpoint"] if best_loss_row is not None else "N/A",
+            f"{best_loss:.3f}" if best_loss_row is not None else None,
+        )
+
+        st.caption(
+            "`3.0_Pillar.pt` is marked as the best working model based on practical "
+            "lane-detection behavior, even when another checkpoint has a higher validation metric."
+        )
+
+        display_frame = comparison_frame.copy()
+        display_frame.insert(
+            0,
+            "Selected",
+            display_frame["Checkpoint"].eq(selected_checkpoint.name),
+        )
+        st.dataframe(
+            display_frame,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Selected": st.column_config.CheckboxColumn("Selected"),
+                "Recommended": st.column_config.CheckboxColumn("Recommended"),
+                "Parameters": st.column_config.NumberColumn("Parameters", format="%d"),
+                "Size MB": st.column_config.NumberColumn("Size MB", format="%.1f"),
+                "Best val IoU": st.column_config.NumberColumn("Best val IoU", format="%.4f"),
+                "Lowest val loss": st.column_config.NumberColumn("Lowest val loss", format="%.3f"),
+                "Latest val IoU": st.column_config.NumberColumn("Latest val IoU", format="%.4f"),
+                "Latest val loss": st.column_config.NumberColumn("Latest val loss", format="%.3f"),
+            },
+        )
+
+        if curves:
+            curve_frame = pd.DataFrame(curves)
+            iou_columns = [column for column in curve_frame.columns if column.endswith("val_iou")]
+            loss_columns = [column for column in curve_frame.columns if column.endswith("val_total")]
+            if iou_columns:
+                st.line_chart(curve_frame[iou_columns])
+            if loss_columns:
+                st.line_chart(curve_frame[loss_columns])
+
+
+@st.cache_data
+def load_training_summary():
+    notebook_path = DEEP_LEARNING_DIR / "trainCULane.ipynb"
+    if not notebook_path.exists():
+        return {
+            "notebook": None,
+            "train_samples": None,
+            "val_samples": None,
+            "train_batches": None,
+            "val_batches": None,
+            "best_epoch": None,
+            "best_iou": None,
+            "latest": None,
+        }
+
+    text = notebook_path.read_text(encoding="utf-8", errors="ignore")
+    dataset_values = {}
+    for key in ["train samples", "val samples", "train batches", "val batches"]:
+        match = re.search(rf"{re.escape(key)}:\s*(\d+)", text)
+        dataset_values[key.replace(" ", "_")] = int(match.group(1)) if match else None
+
+    metric_pattern = re.compile(
+        r"\[(\d+)/(\d+)\]\s+"
+        r"train_total=([0-9.]+)\s+"
+        r"train_bin=([0-9.]+)\s+"
+        r"train_disc=([0-9.]+)\s+\|\s+"
+        r"val_total=([0-9.]+)\s+"
+        r"val_bin=([0-9.]+)\s+"
+        r"val_disc=([0-9.]+)\s+"
+        r"val_iou=([0-9.]+)"
+    )
+    rows = [
+        {
+            "epoch": int(match.group(1)),
+            "total_epochs": int(match.group(2)),
+            "train_total": float(match.group(3)),
+            "train_binary": float(match.group(4)),
+            "train_discriminative": float(match.group(5)),
+            "val_total": float(match.group(6)),
+            "val_binary": float(match.group(7)),
+            "val_discriminative": float(match.group(8)),
+            "val_iou": float(match.group(9)),
+        }
+        for match in metric_pattern.finditer(text)
+    ]
+
+    best = max(rows, key=lambda row: row["val_iou"], default=None)
+    return {
+        "notebook": notebook_path.name,
+        **dataset_values,
+        "best_epoch": best["epoch"] if best else None,
+        "best_iou": best["val_iou"] if best else None,
+        "latest": rows[-1] if rows else None,
+    }
+
+
+def show_deep_learning_model_details(
+    model,
+    architecture,
+    device,
+    checkpoint_path,
+    checkpoint_epoch,
+):
+    total_params, trainable_params = count_parameters(model)
+    checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
+    history_path = checkpoint_history_path(checkpoint_path)
+    checkpoint_history = load_checkpoint_history(str(history_path))
+    training_summary = load_training_summary()
+
+    with st.expander("Deep learning model details", expanded=False):
+        st.subheader("Model features")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Architecture", architecture)
+        col2.metric("Parameters", format_number(total_params))
+        col3.metric("Trainable", format_number(trainable_params))
+        col4.metric("Checkpoint epoch", checkpoint_epoch or "N/A")
+
+        st.caption(
+            f"Checkpoint: `{checkpoint_path.name}` | "
+            f"Size: `{checkpoint_size_mb:.1f} MB` | Device: `{device}`"
+        )
+
+        st.markdown("**Architecture summary**")
+        if architecture == "LaneNetResNet34":
+            st.write(
+                "ResNet34 encoder with U-Net style decoder heads. One decoder predicts "
+                "binary lane/background logits, and the second decoder predicts a "
+                "4-channel instance embedding map for separating lane instances."
+            )
+        else:
+            st.write(
+                "ENet-style LaneNet encoder with two independent decoder heads: binary "
+                "segmentation and 4-channel instance embedding."
+            )
+
+        if checkpoint_history:
+            st.markdown("**Training results from checkpoint history**")
+            best = checkpoint_history["best"]
+            latest = checkpoint_history["latest"]
+            lowest_val_loss = checkpoint_history["lowest_val_loss"]
+
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("History epochs", len(checkpoint_history["rows"]))
+            metric_cols[1].metric("Best validation IoU", f"{best['val_iou']:.4f}")
+            metric_cols[2].metric("Best IoU epoch", best["epoch"])
+            metric_cols[3].metric(
+                "Lowest validation loss",
+                f"{lowest_val_loss['val_total']:.3f}",
+            )
+
+            st.table(
+                [
+                    {"Metric": "Latest epoch", "Value": latest["epoch"]},
+                    {"Metric": "Latest train total loss", "Value": f"{latest['train_total']:.3f}"},
+                    {"Metric": "Latest validation total loss", "Value": f"{latest['val_total']:.3f}"},
+                    {"Metric": "Latest validation IoU", "Value": f"{latest['val_iou']:.4f}"},
+                    {"Metric": "Best train total loss", "Value": f"{best['train_total']:.3f}"},
+                    {"Metric": "Best validation total loss", "Value": f"{best['val_total']:.3f}"},
+                    {"Metric": "Best validation binary loss", "Value": f"{best['val_binary']:.3f}"},
+                    {"Metric": "Best validation discriminative loss", "Value": f"{best['val_disc']:.3f}"},
+                ]
+            )
+
+            chart_rows = pd.DataFrame(checkpoint_history["rows"]).set_index("epoch")
+            loss_columns = [
+                column
+                for column in ["train_total", "val_total", "train_binary", "val_binary"]
+                if column in chart_rows
+            ]
+            if loss_columns:
+                st.line_chart(chart_rows[loss_columns])
+            if "val_iou" in chart_rows:
+                st.line_chart(chart_rows[["val_iou"]])
+
+            st.caption(f"History source: `{checkpoint_history['path']}`")
+            return
+
+        st.markdown("**Training results found in notebook logs**")
+        metric_cols = st.columns(4)
+        metric_cols[0].metric(
+            "Train samples",
+            format_number(training_summary["train_samples"])
+            if training_summary["train_samples"]
+            else "N/A",
+        )
+        metric_cols[1].metric(
+            "Validation samples",
+            format_number(training_summary["val_samples"])
+            if training_summary["val_samples"]
+            else "N/A",
+        )
+        metric_cols[2].metric(
+            "Best validation IoU",
+            f"{training_summary['best_iou']:.4f}"
+            if training_summary["best_iou"] is not None
+            else "N/A",
+        )
+        metric_cols[3].metric(
+            "Best epoch",
+            training_summary["best_epoch"] or "N/A",
+        )
+
+        latest = training_summary["latest"]
+        if latest:
+            st.table(
+                [
+                    {"Metric": "Latest logged epoch", "Value": latest["epoch"]},
+                    {"Metric": "Train total loss", "Value": f"{latest['train_total']:.3f}"},
+                    {"Metric": "Validation total loss", "Value": f"{latest['val_total']:.3f}"},
+                    {"Metric": "Validation IoU", "Value": f"{latest['val_iou']:.4f}"},
+                ]
+            )
+        else:
+            st.info("No epoch-by-epoch training metrics were found in the notebook logs.")
+
+        st.caption(
+            "The selected checkpoint stores model weights, optimizer state, and epoch. "
+            "Detailed validation metrics are read from the available training notebook logs."
+        )
+
+
 def read_uploaded_image(uploaded_file):
     file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
     return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+
+def get_image_processing_settings(media_name, key_prefix):
+    width, height = FRAME_SIZE
+    preset_name = get_perspective_preset_for_media(media_name)
+    perspective_defaults = PERSPECTIVE_PRESETS[preset_name]
+    hsv_defaults = get_hsv_preset_for_media(media_name)
+
+    st.sidebar.subheader("Image processing controls")
+    st.sidebar.caption(f"Defaults: `{preset_name}` perspective preset")
+
+    lower_default = hsv_defaults["lower"]
+    upper_default = hsv_defaults["upper"]
+    with st.sidebar.expander("HSV thresholds", expanded=True):
+        st.caption("Lower HSV")
+        lower_h = st.slider(
+            "Lower H",
+            0,
+            179,
+            int(lower_default[0]),
+            key=f"{key_prefix}_lower_h",
+        )
+        lower_s = st.slider(
+            "Lower S",
+            0,
+            255,
+            int(lower_default[1]),
+            key=f"{key_prefix}_lower_s",
+        )
+        lower_v = st.slider(
+            "Lower V",
+            0,
+            255,
+            int(lower_default[2]),
+            key=f"{key_prefix}_lower_v",
+        )
+
+        st.caption("Upper HSV")
+        upper_h = st.slider(
+            "Upper H",
+            0,
+            179,
+            int(upper_default[0]),
+            key=f"{key_prefix}_upper_h",
+        )
+        upper_s = st.slider(
+            "Upper S",
+            0,
+            255,
+            int(upper_default[1]),
+            key=f"{key_prefix}_upper_s",
+        )
+        upper_v = st.slider(
+            "Upper V",
+            0,
+            255,
+            int(upper_default[2]),
+            key=f"{key_prefix}_upper_v",
+        )
+
+    perspective_points = []
+    point_labels = {
+        "top_left": "Top left",
+        "bottom_left": "Bottom left",
+        "top_right": "Top right",
+        "bottom_right": "Bottom right",
+    }
+    with st.sidebar.expander("Perspective source points", expanded=True):
+        for point_key, label in point_labels.items():
+            default_x, default_y = perspective_defaults[point_key]
+            st.caption(label)
+            x_value = st.slider(
+                f"{label} X",
+                0,
+                width - 1,
+                int(default_x),
+                key=f"{key_prefix}_{point_key}_x",
+            )
+            y_value = st.slider(
+                f"{label} Y",
+                0,
+                height - 1,
+                int(default_y),
+                key=f"{key_prefix}_{point_key}_y",
+            )
+            perspective_points.append((x_value, y_value))
+
+    return {
+        "lower_hsv": (lower_h, lower_s, lower_v),
+        "upper_hsv": (upper_h, upper_s, upper_v),
+        "perspective_points": perspective_points,
+    }
 
 
 model = None
@@ -88,6 +569,7 @@ def load_model(ckpt_path):
         device = "cpu"
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    checkpoint_epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
     state_dict = ckpt.get("model_state_dict", ckpt)
     first_key = next(iter(state_dict), "")
 
@@ -101,11 +583,19 @@ def load_model(ckpt_path):
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
-    return model, device, architecture
+    return model, device, architecture, checkpoint_epoch
 
 if technique == "Deep learning":
-    model, device, architecture = load_model(str(selected_checkpoint))
+    model, device, architecture, checkpoint_epoch = load_model(str(selected_checkpoint))
     st.sidebar.info(f"Loaded `{selected_checkpoint.name}` ({architecture}) on `{device}`")
+    show_deep_learning_model_details(
+        model,
+        architecture,
+        device,
+        selected_checkpoint,
+        checkpoint_epoch,
+    )
+    show_model_comparison(get_available_checkpoints(), selected_checkpoint)
 
 # ───────────────────────── 3. Preprocess + inference helpers ─────────────────────────
 IMNET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -200,8 +690,20 @@ def embedding_image(embedding):
     return (np.clip(channels, 0.0, 1.0) * 255).astype(np.uint8)
 
 
-def run_image_processing(frame_bgr, media_name=None):
-    return process_frame(frame_bgr, media_name=media_name)
+def run_image_processing(
+    frame_bgr,
+    media_name=None,
+    lower_hsv=None,
+    upper_hsv=None,
+    perspective_points=None,
+):
+    return process_frame(
+        frame_bgr,
+        media_name=media_name,
+        lower_hsv=lower_hsv,
+        upper_hsv=upper_hsv,
+        perspective_points=perspective_points,
+    )
 
 
 @torch.no_grad()
@@ -294,8 +796,15 @@ if mode == "Image":
         if uploaded:
             frame_bgr = read_uploaded_image(uploaded)
 
-    if frame_bgr is not None:
+    image_processing_settings = None
+    if technique == "Image processing" and frame_bgr is not None:
+        settings_media_key = Path(media_name or "uploaded_image").stem
+        image_processing_settings = get_image_processing_settings(
+            media_name,
+            f"image_processing_image_{settings_media_key}",
+        )
 
+    if frame_bgr is not None:
         if technique == "Deep learning":
             annotated, lanes, binary_rgb, model_outputs = run_inference(
                 frame_bgr,
@@ -320,7 +829,11 @@ if mode == "Image":
                 f"{model_outputs['lane_probability_values'].max():.3f}"
             )
         else:
-            outputs = run_image_processing(frame_bgr, media_name=media_name)
+            outputs = run_image_processing(
+                frame_bgr,
+                media_name=media_name,
+                **image_processing_settings,
+            )
             col1, col2 = st.columns(2)
             col1.image(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB), caption="Input")
             col2.image(outputs["annotated"], caption="Image processing result")
@@ -365,6 +878,14 @@ else:   # Video
             video_path = tmp_in
             media_name = uploaded.name
 
+    image_processing_settings = None
+    if technique == "Image processing" and video_path:
+        settings_media_key = Path(media_name or "uploaded_video").stem
+        image_processing_settings = get_image_processing_settings(
+            media_name,
+            f"image_processing_video_{settings_media_key}",
+        )
+
     if video_path:
         if st.button("Process video"):
             cap = cv2.VideoCapture(video_path)
@@ -408,7 +929,11 @@ else:   # Video
                     )
                     previous_ego_selection = model_outputs["ego_selection"]
                 else:
-                    outputs = run_image_processing(frame, media_name=media_name)
+                    outputs = run_image_processing(
+                        frame,
+                        media_name=media_name,
+                        **image_processing_settings,
+                    )
                     annotated = outputs["annotated"]
                     lane_canvas = outputs["bird_eye"]
                     model_outputs = {

@@ -22,6 +22,29 @@ The deep learning pipeline is the main part of this project. It is designed to
 be more flexible than fixed-rule image processing because the model learns lane
 features directly from data.
 
+## Model 3.0 Pillar Results
+
+The best working model in the final project demo is `3.0_Pillar.pt`. Although
+validation metrics are useful for comparison, this model was selected because it
+gave the most reliable visual lane detection behavior in the complete inference
+pipeline.
+
+### Example Output Video
+
+<video src="ExampleOutput.mov" controls width="800"></video>
+
+If the video does not render in your Markdown viewer, open it directly:
+
+[Example output video](ExampleOutput.mov)
+
+### Model Features
+
+![Model 3.0 Pillar features](Model_3.0_Pillar_Features.png)
+
+### Training Graphs
+
+![Model 3.0 Pillar graphs](Model_3.0_Pillar_Graphs.png)
+
 ## Model Architecture
 
 The main model is implemented in:
@@ -309,4 +332,3 @@ the other learns instance embeddings. The model is trained with a combination of
 segmentation loss and discriminative embedding loss. After inference, DBSCAN and
 polynomial fitting are used to convert dense predictions into individual lane
 curves.
-
