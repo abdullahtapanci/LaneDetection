@@ -29,6 +29,10 @@ validation metrics are useful for comparison, this model was selected because it
 gave the most reliable visual lane detection behavior in the complete inference
 pipeline.
 
+### Example Output Preview
+
+![Example output preview](ExampleOutput.png)
+
 ### Example Output Video
 
 <video src="ExampleOutput.mov" controls width="800"></video>
