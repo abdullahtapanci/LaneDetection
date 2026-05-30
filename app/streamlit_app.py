@@ -541,6 +541,8 @@ model = None
 device = "cpu"
 architecture = None
 selected_checkpoint = None
+clustering_mode = "embedding_spatial"
+horizon_padding = 20
 
 if technique == "Deep learning":
     # ───────────────────────── 1. Select and load model ─────────────────────────
@@ -554,6 +556,29 @@ if technique == "Deep learning":
         checkpoint_paths,
         index=0,
         format_func=lambda path: path.stem.replace("_", " ").title(),
+    )
+    use_spatial_clustering = st.sidebar.toggle(
+        "Use spatial coordinates for clustering",
+        value=True,
+        help=(
+            "When enabled, DBSCAN uses embedding vectors together with normalized "
+            "x/y lane-pixel coordinates. When disabled, DBSCAN uses only the "
+            "network embedding vectors."
+        ),
+    )
+    clustering_mode = (
+        "embedding_spatial" if use_spatial_clustering else "embedding_only"
+    )
+    horizon_padding = st.sidebar.slider(
+        "Horizon padding",
+        min_value=0,
+        max_value=120,
+        value=20,
+        step=5,
+        help=(
+            "Extra rows ignored below the detected horizon before clustering. "
+            "Increasing this can remove noisy far-away lane pixels."
+        ),
     )
     enable_lane_departure = st.sidebar.toggle("Lane departure", value=True)
 else:
@@ -711,6 +736,8 @@ def run_inference(
     frame_bgr,
     previous_ego_selection=None,
     lane_departure_enabled=True,
+    clustering_mode="embedding_spatial",
+    horizon_padding=20,
     media_name=None,
 ):
     x, frame_rgb = preprocess(frame_bgr)
@@ -727,10 +754,11 @@ def run_inference(
         min_blob_pixels=MIN_BLOB_PIXELS,
         lane_probability_threshold=0.95,
         horizon_min_pixels=12,
-        horizon_padding=20,
+        horizon_padding=horizon_padding,
         eps=0.35,
         min_samples=20,
         spatial_weight=0.5,
+        clustering_mode=clustering_mode,
         min_pixels=100,
         poly_degree=2
     )
@@ -809,6 +837,8 @@ if mode == "Image":
             annotated, lanes, binary_rgb, model_outputs = run_inference(
                 frame_bgr,
                 lane_departure_enabled=enable_lane_departure,
+                clustering_mode=clustering_mode,
+                horizon_padding=horizon_padding,
                 media_name=media_name,
             )
             col1, col2, col3 = st.columns(3)
@@ -925,6 +955,8 @@ else:   # Video
                         frame,
                         previous_ego_selection,
                         lane_departure_enabled=enable_lane_departure,
+                        clustering_mode=clustering_mode,
+                        horizon_padding=horizon_padding,
                         media_name=media_name,
                     )
                     previous_ego_selection = model_outputs["ego_selection"]

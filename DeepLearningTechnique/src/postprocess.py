@@ -37,14 +37,23 @@ def _find_horizon_row(mask: np.ndarray, min_pixels: int = 5) -> int:
 
 def _filter_small_blobs(mask: np.ndarray, min_blob_pixels: int) -> np.ndarray:
     """Remove connected components smaller than min_blob_pixels."""
+    # OpenCV functions usually expect images in numeric format, not boolean format.
     mask_uint8 = mask.astype(np.uint8)
+
+    # Num labels represents the number of connected components found (including background), 
+    # labels is an array of the same shape as mask_uint8 where each pixel's value is the label of the component it belongs to, 
+    # and stats contains statistics about each component.
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        mask_uint8, connectivity=8
+        mask_uint8, connectivity=8 # 4 means only orthogonal neighbors, 8 means also diagonal neighbors are connected
     )
+    # Create a new empty mask with the same shape as the input mask.
+    # At first, all pixels are set to 0.
+    # This will store only the blobs that are large enough.
     cleaned = np.zeros_like(mask_uint8)
-    for label in range(1, num_labels):          # skip background (label 0)
-        if stats[label, cv2.CC_STAT_AREA] >= min_blob_pixels:
+    for label in range(1, num_labels): # skip background (label 0)
+        if stats[label, cv2.CC_STAT_AREA] >= min_blob_pixels: # CC_STAT_AREA : The total number of pixels in the component.
             cleaned[labels == label] = 1
+    # Converts the cleaned mask back to boolean format.       
     return cleaned.astype(bool)
 
 
@@ -66,6 +75,7 @@ def my_postprocess(
     min_samples: int        = 20,
     # ── spatial weight in feature vector ─────────────────────────────────
     spatial_weight: float   = 0.5,
+    clustering_mode: str    = "embedding_spatial",
     # ── per-lane quality gate ─────────────────────────────────────────────
     min_pixels: int         = 100,
     # ── polynomial fitting ────────────────────────────────────────────────
@@ -97,6 +107,10 @@ def my_postprocess(
         Weight applied to normalised (x, y) coordinates before they are
         concatenated to the embedding features.  Increase to make spatial
         position matter more during clustering.
+    clustering_mode : str
+        Feature set used by DBSCAN. Use "embedding_spatial" to cluster with
+        embedding vectors plus normalised spatial coordinates, or
+        "embedding_only" to cluster with only embedding vectors.
     min_pixels : int
         Minimum number of pixels a cluster must contain to be kept.
     poly_degree : int
@@ -121,7 +135,7 @@ def my_postprocess(
 
     # ── 3. Find horizon and apply padding ────────────────────────────────
     horizon_row = _find_horizon_row(mask, horizon_min_pixels)
-    cutoff_row  = horizon_row + horizon_padding  # ignore everything above this
+    cutoff_row = min(H, horizon_row + max(0, horizon_padding))  # ignore everything above this
 
     # zero-out everything above (and including) the horizon + padding zone
     mask[:cutoff_row, :] = False
@@ -131,15 +145,21 @@ def my_postprocess(
     if len(ys) == 0:
         return []
 
-    # ── 4. Build feature matrix: embedding + spatial coords ───────────────
+    # ── 4. Build feature matrix for clustering ────────────────────────────
     #   embedding features: shape (D,) per pixel
     emb_features = embedding[:, ys, xs].T          # (N, D)
 
-    #   normalised spatial coordinates, scaled by spatial_weight
-    x_norm = (xs / (W - 1)).reshape(-1, 1) * spatial_weight
-    y_norm = (ys / (H - 1)).reshape(-1, 1) * spatial_weight
-
-    features = np.concatenate([emb_features, x_norm, y_norm], axis=1)  # (N, D+2)
+    if clustering_mode == "embedding_spatial":
+        # normalised spatial coordinates, scaled by spatial_weight
+        x_norm = (xs / (W - 1)).reshape(-1, 1) * spatial_weight
+        y_norm = (ys / (H - 1)).reshape(-1, 1) * spatial_weight
+        features = np.concatenate([emb_features, x_norm, y_norm], axis=1)  # (N, D+2)
+    elif clustering_mode == "embedding_only":
+        features = emb_features
+    else:
+        raise ValueError(
+            "clustering_mode must be 'embedding_spatial' or 'embedding_only'"
+        )
 
     # ── 5. DBSCAN clustering ───────────────────────────────────────────────
     db = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
