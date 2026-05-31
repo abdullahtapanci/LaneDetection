@@ -383,15 +383,59 @@ def show_deep_learning_model_details(
             )
 
             chart_rows = pd.DataFrame(checkpoint_history["rows"]).set_index("epoch")
-            loss_columns = [
+
+            st.markdown("**Training curves**")
+            chart_col1, chart_col2, chart_col3 = st.columns(3)
+
+            total_loss_columns = [
+                column for column in ["train_total", "val_total"] if column in chart_rows
+            ]
+            if total_loss_columns:
+                chart_col1.caption("Total loss")
+                chart_col1.line_chart(chart_rows[total_loss_columns])
+
+            binary_loss_columns = [
+                column for column in ["train_binary", "val_binary"] if column in chart_rows
+            ]
+            if binary_loss_columns:
+                chart_col2.caption("Binary segmentation loss")
+                chart_col2.line_chart(chart_rows[binary_loss_columns])
+
+            disc_loss_columns = [
+                column for column in ["train_disc", "val_disc"] if column in chart_rows
+            ]
+            if disc_loss_columns:
+                chart_col3.caption("Discriminative loss")
+                chart_col3.line_chart(chart_rows[disc_loss_columns])
+
+            detail_col1, detail_col2 = st.columns(2)
+
+            disc_component_columns = [
                 column
-                for column in ["train_total", "val_total", "train_binary", "val_binary"]
+                for column in ["train_variance", "train_distance"]
                 if column in chart_rows
             ]
-            if loss_columns:
-                st.line_chart(chart_rows[loss_columns])
+            if disc_component_columns:
+                detail_col1.caption("Discriminative components")
+                detail_col1.line_chart(chart_rows[disc_component_columns])
+
             if "val_iou" in chart_rows:
-                st.line_chart(chart_rows[["val_iou"]])
+                detail_col2.caption("Validation lane IoU")
+                detail_col2.line_chart(chart_rows[["val_iou"]])
+
+            extra_loss_columns = [
+                column
+                for column in [
+                    "train_binary_ce",
+                    "val_binary_ce",
+                    "train_binary_dice",
+                    "val_binary_dice",
+                ]
+                if column in chart_rows
+            ]
+            if extra_loss_columns:
+                st.caption("Cross entropy and Dice loss components")
+                st.line_chart(chart_rows[extra_loss_columns])
 
             st.caption(f"History source: `{checkpoint_history['path']}`")
             return
